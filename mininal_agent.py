@@ -13,11 +13,12 @@ LUMPAPI_PATH = os.getenv("LUMPAPI_PATH")
 
 if not ANTHROPIC_API_KEY:
     raise ValueError("ANTHROPIC_API_KEY not set in .env")
-if not LUMPAPI_PATH:
-    raise ValueError("LUMPAPI_PATH not set in .env")
 
 print(f"API Key loaded: {ANTHROPIC_API_KEY[:20]}...")
-print(f"Lumerical path: {LUMPAPI_PATH}")
+if LUMPAPI_PATH:
+    print(f"Lumerical path: {LUMPAPI_PATH}")
+else:
+    print("Lumerical not configured - simulation will be skipped")
 
 
 class CavityAgent:

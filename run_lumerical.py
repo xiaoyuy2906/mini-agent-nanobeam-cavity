@@ -5,13 +5,19 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Lumerical API path
+# Lumerical API path (optional - not available on macOS)
 LUMPAPI_PATH = os.getenv("LUMPAPI_PATH")
-if not LUMPAPI_PATH:
-    raise ValueError("LUMPAPI_PATH not set in .env")
+LUMERICAL_AVAILABLE = False
 
-sys.path.append(LUMPAPI_PATH)
-import lumapi
+if LUMPAPI_PATH:
+    sys.path.append(LUMPAPI_PATH)
+    try:
+        import lumapi
+        LUMERICAL_AVAILABLE = True
+    except ImportError:
+        print("Warning: lumapi not found. Lumerical simulation disabled.")
+else:
+    print("Note: LUMPAPI_PATH not set. Lumerical simulation disabled.")
 
 # Output folder for FDTD files
 FDTD_OUTPUT_FOLDER = "fdtd_output"
@@ -34,6 +40,13 @@ def run_fdtd_simulation(config, mesh_accuracy=4, run=False):
     Returns:
         dict with simulation results
     """
+    if not LUMERICAL_AVAILABLE:
+        return {
+            "status": "skipped",
+            "message": "Lumerical not available (LUMPAPI_PATH not set or lumapi import failed)",
+            "gds_file": config.get("lumerical", {}).get("gds_file", "unknown"),
+        }
+
     # Extract lumerical config
     lum_config = config["lumerical"]
     gds_file = lum_config["gds_file"]
@@ -195,6 +208,10 @@ def run_fdtd_simulation(config, mesh_accuracy=4, run=False):
 
 
 if __name__ == "__main__":
+    if not LUMERICAL_AVAILABLE:
+        print("Lumerical not available. Cannot run standalone simulation.")
+        sys.exit(1)
+
     # Example: run with build_gds config
     from build_gds import build_cavity_gds
 
