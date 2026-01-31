@@ -11,4 +11,5 @@ dependencies = [
     "gdspy>=1.6.13",
     "numpy>=2.4.1",
     "python-dotenv>=1.2.1",
+    "seaborn>=0.13.2",
 ]

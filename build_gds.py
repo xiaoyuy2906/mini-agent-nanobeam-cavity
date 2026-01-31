@@ -65,6 +65,7 @@ class build_cavity_gds:
 
         self.layer = layer
         self.gds_filepath = None
+        self.cell_name = None
 
         self._precompute_cavity_params()
         self._precompute_geometry()
@@ -111,6 +112,9 @@ class build_cavity_gds:
 
     def _precompute_geometry(self):
         """Pre-compute hole positions and sizes"""
+        # Clear gdsfactory cache to avoid name conflicts between iterations
+        gf.clear_cache()
+
         period = self.period
         rx = self.hole_rx
         ry = self.hole_ry
@@ -274,7 +278,7 @@ class build_cavity_gds:
             # For run_lumerical
             "lumerical": {
                 "gds_file": self.gds_filepath,
-                "cell_name": CELL_NAME,
+                "cell_name": self.cell_name,
                 "layer": self.layer,
                 "material": MATERIAL,
             },
@@ -283,8 +287,11 @@ class build_cavity_gds:
 
     def _generate_filename(self):
         """Generate filename based on key parameters"""
+        # Convert period to nm for filename (period is in microns)
+        period_nm = int(self.period * 1000)
         name = (
             f"cavity_"
+            f"p{period_nm}_"
             f"t{self.num_taper_holes}_"
             f"m{self.num_mirror_holes}_"
             f"{self.taper_type}_"
@@ -311,10 +318,14 @@ class build_cavity_gds:
         # Relative path (use forward slashes for cross-platform)
         rel_path = f"{folder}/{filename}"
 
-        # Save GDS
-        c = gf.Component(CELL_NAME)
+        # Use unique cell name from filename (without .gds)
+        cell_name = filename.replace(".gds", "")
+
+        # Save GDS with unique cell name
+        c = gf.Component(cell_name)
         c.add_ref(self.cavity_template)
         c.write_gds(rel_path)
 
         self.gds_filepath = rel_path
+        self.cell_name = cell_name
         return rel_path

@@ -14,6 +14,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 from anthropic import Anthropic
 from build_gds import build_cavity_gds
+from run_lumerical import run_fdtd_simulation
 import numpy as np
 
 load_dotenv()
@@ -21,6 +22,53 @@ load_dotenv()
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 if not ANTHROPIC_API_KEY:
     raise ValueError("ANTHROPIC_API_KEY not set in .env")
+
+# Optional calibration dataset (JSON). If present, will scale Q/V estimates.
+CALIBRATION_PATH = os.getenv("CAVITY_CALIBRATION_PATH", "calibration_data.json")
+
+
+def _load_calibration_samples(path):
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        samples = data.get("samples", [])
+        return samples if samples else None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _compute_calibration(samples, unit_cell):
+    """
+    Compute scale factors for Q and V from measured data.
+    Each sample should contain:
+      - design_params
+      - measured_q
+      - measured_v
+    """
+    q_scales = []
+    v_scales = []
+    for sample in samples:
+        params = sample.get("design_params", {})
+        measured_q = sample.get("measured_q")
+        measured_v = sample.get("measured_v")
+        if measured_q is None or measured_v is None:
+            continue
+
+        est = _estimate_base_performance(unit_cell, params)
+        if est["Q"] > 0 and est["V"] > 0:
+            q_scales.append(measured_q / est["Q"])
+            v_scales.append(measured_v / est["V"])
+
+    if not q_scales or not v_scales:
+        return None
+
+    return {
+        "scale_q": float(np.median(q_scales)),
+        "scale_v": float(np.median(v_scales)),
+        "num_samples": min(len(q_scales), len(v_scales)),
+    }
 
 
 class CavityDesignState:
@@ -60,11 +108,11 @@ class CavityDesignState:
         }
 
 
-def estimate_cavity_performance(unit_cell, design_params):
+def _estimate_base_performance(unit_cell, design_params):
     """
     Analytical estimation of Q factor and mode volume.
     This is a simplified model for iteration without Lumerical.
-    
+
     Physics-based heuristics:
     - More taper holes → higher Q (better mode matching) but larger V
     - Smaller min_a_percent → stronger confinement → higher Q, smaller V
@@ -128,13 +176,37 @@ def estimate_cavity_performance(unit_cell, design_params):
         "Q": int(Q),
         "V": round(V, 3),
         "qv_ratio": int(Q / V),
-        "resonance_wavelength_nm": round(wavelength * 1e9 * (1 + 0.01 * (np.random.random() - 0.5)), 1),
+        "resonance_wavelength_nm": round(
+            wavelength * 1e9 * (1 + 0.01 * (np.random.random() - 0.5)), 1
+        ),
         "notes": [
             f"Mirror holes: {num_mirror} (Q contribution: {base_q:.0f})",
             f"Taper profile: {taper_type} (factor: {profile_factor})",
             f"Period chirp: {100-min_a_percent}% (stronger = higher Q, smaller V)",
         ],
     }
+
+
+def estimate_cavity_performance(unit_cell, design_params, calibration=None):
+    """
+    Estimate Q/V using heuristics, optionally scaled by calibration data.
+    """
+    base = _estimate_base_performance(unit_cell, design_params)
+    if not calibration:
+        return base
+
+    scale_q = calibration.get("scale_q", 1.0)
+    scale_v = calibration.get("scale_v", 1.0)
+    q = int(base["Q"] * scale_q)
+    v = round(base["V"] * scale_v, 3)
+    base["Q"] = q
+    base["V"] = v
+    base["qv_ratio"] = int(q / v) if v > 0 else 0
+    base["notes"] = base["notes"] + [
+        f"Calibration: scale_q={scale_q:.3f}, scale_v={scale_v:.3f}",
+        f"Calibration samples: {calibration.get('num_samples', 0)}",
+    ]
+    return base
 
 
 class SWECavityAgent:
@@ -144,6 +216,8 @@ class SWECavityAgent:
         self.client = Anthropic(api_key=api_key)
         self.state = CavityDesignState()
         self.conversation_history = []
+        self.calibration_samples = _load_calibration_samples(CALIBRATION_PATH)
+        self.calibration = None
 
         self.system_prompt = self._build_system_prompt()
         self.tools = self._define_tools()
@@ -203,6 +277,10 @@ Be systematic. Track what you've tried. Form hypotheses and test them."""
                             "type": "number",
                             "description": "Target wavelength in nm (e.g., 737 for SiV, 637 for NV)",
                         },
+                        "wavelength_span_nm": {
+                            "type": "number",
+                            "description": "Half-span in nm (e.g., 100 for ±100nm)",
+                        },
                         "period_nm": {
                             "type": "number",
                             "description": "Lattice period in nm",
@@ -226,6 +304,14 @@ Be systematic. Track what you've tried. Form hypotheses and test them."""
                         "material": {
                             "type": "string",
                             "enum": ["SiN", "Si", "Diamond", "GaAs"],
+                        },
+                        "freestanding": {
+                            "type": "boolean",
+                            "description": "If true, no substrate is added in FDTD",
+                        },
+                        "substrate": {
+                            "type": "string",
+                            "description": "Substrate material name (e.g., SiO2)",
                         },
                     },
                     "required": [
@@ -264,6 +350,14 @@ Be systematic. Track what you've tried. Form hypotheses and test them."""
                         "min_hole_percent": {
                             "type": "number",
                             "description": "Minimum hole size at center as % (70-100)",
+                        },
+                        "use_fdtd": {
+                            "type": "boolean",
+                            "description": "If true, run Lumerical FDTD for real Q/V",
+                        },
+                        "mesh_accuracy": {
+                            "type": "integer",
+                            "description": "FDTD mesh accuracy (1-8)",
                         },
                         "hypothesis": {
                             "type": "string",
@@ -329,20 +423,43 @@ Be systematic. Track what you've tried. Form hypotheses and test them."""
             return {"error": f"Unknown tool: {tool_name}"}
 
     def _set_unit_cell(self, params):
+        freestanding = params.get("freestanding", True)
+        substrate = params.get("substrate", "none")
+        if freestanding:
+            substrate = "none"
+
+        substrate_map = {
+            "SiO2": "SiO2 (Glass) - Palik",
+            "Si": "Si (Silicon) - Palik",
+            "Diamond": "Diamond - Palik",
+            "none": None,
+        }
+
+        wavelength_span_nm = params.get("wavelength_span_nm", 100)
         self.state.unit_cell = {
             "design_wavelength": params["design_wavelength_nm"] * 1e-9,
+            "wavelength_span": wavelength_span_nm * 1e-9,
             "period": params["period_nm"] * 1e-9,
             "wg_width": params["wg_width_nm"] * 1e-9,
             "wg_height": params["wg_height_nm"] * 1e-9,
             "hole_rx": params["hole_rx_nm"] * 1e-9,
             "hole_ry": params["hole_ry_nm"] * 1e-9,
             "material": params["material"],
+            "freestanding": freestanding,
+            "substrate": substrate,
+            "substrate_lumerical": substrate_map.get(substrate),
         }
+        if self.calibration_samples:
+            self.calibration = _compute_calibration(
+                self.calibration_samples, self.state.unit_cell
+            )
         return {
             "status": "success",
             "message": "Unit cell configured",
-            "unit_cell": {k: f"{v*1e9:.1f} nm" if isinstance(v, float) else v 
-                        for k, v in self.state.unit_cell.items()},
+            "unit_cell": {
+                k: f"{v*1e9:.1f} nm" if isinstance(v, float) else v
+                for k, v in self.state.unit_cell.items()
+            },
             "next_step": "Now call design_cavity to create your first design",
         }
 
@@ -379,8 +496,55 @@ Be systematic. Track what you've tried. Form hypotheses and test them."""
         except Exception as e:
             gds_file = f"Error: {e}"
 
-        # Estimate performance (mock simulation)
-        performance = estimate_cavity_performance(self.state.unit_cell, design_params)
+        # Real FDTD simulation (optional)
+        use_fdtd = (
+            params.get("use_fdtd", False) or os.getenv("USE_LUMERICAL_REAL") == "1"
+        )
+        mesh_accuracy = params.get("mesh_accuracy", 8)
+        fdtd_result = None
+
+        if use_fdtd and isinstance(gds_file, str) and not gds_file.startswith("Error"):
+            config = cavity.get_config()
+            config["unit_cell"]["wg_height"] = self.state.unit_cell["wg_height"] * 1e6
+            config["wavelength"] = {
+                "design_wavelength": self.state.unit_cell["design_wavelength"],
+                "wavelength_span": self.state.unit_cell["wavelength_span"],
+            }
+            config["substrate"] = {
+                "freestanding": self.state.unit_cell["freestanding"],
+                "material": self.state.unit_cell["substrate"],
+                "material_lumerical": self.state.unit_cell["substrate_lumerical"],
+            }
+            try:
+                fdtd_result = run_fdtd_simulation(
+                    config, mesh_accuracy=mesh_accuracy, run=True
+                )
+            except Exception as e:
+                fdtd_result = {"error": str(e)}
+
+        # Estimate performance (fallback or for fast iteration)
+        performance = estimate_cavity_performance(
+            self.state.unit_cell, design_params, calibration=self.calibration
+        )
+
+        # Override with FDTD values if available
+        if fdtd_result and fdtd_result.get("Q") and fdtd_result.get("V"):
+            # Get resonance wavelength
+            if fdtd_result.get("resonance_wavelength"):
+                res_wl = fdtd_result["resonance_wavelength"]
+                performance["resonance_wavelength_nm"] = float(np.round(res_wl * 1e9, 2))
+            else:
+                res_wl = self.state.unit_cell["design_wavelength"]
+
+            # Normalize V from m³ to (λ/n)³ units
+            n_eff = 2.0  # approximate effective index for SiN
+            lambda_n_cubed = (res_wl / n_eff) ** 3
+            v_normalized = fdtd_result["V"] / lambda_n_cubed
+
+            performance["Q"] = int(fdtd_result["Q"])
+            performance["V"] = float(np.round(v_normalized, 3))
+            performance["qv_ratio"] = int(fdtd_result["Q"] / v_normalized)
+            performance["notes"] = [f"FDTD result at {performance['resonance_wavelength_nm']} nm"]
 
         # Record in history
         result = {
@@ -394,7 +558,7 @@ Be systematic. Track what you've tried. Form hypotheses and test them."""
 
         # Build observation
         is_best = result["qv_ratio"] >= self.state.best_qv_ratio
-        
+
         return {
             "iteration": self.state.iteration,
             "hypothesis": hypothesis,
@@ -409,6 +573,7 @@ Be systematic. Track what you've tried. Form hypotheses and test them."""
             "is_new_best": is_best,
             "best_qv_so_far": f"{self.state.best_qv_ratio:,}",
             "gds_file": gds_file,
+            "fdtd_result": fdtd_result,
         }
 
     def _view_history(self, params):
@@ -422,25 +587,29 @@ Be systematic. Track what you've tried. Form hypotheses and test them."""
 
         summary = []
         for entry in history:
-            summary.append({
-                "iteration": entry["iteration"],
-                "params": {
-                    "taper": entry["params"]["num_taper_holes"],
-                    "mirror": entry["params"]["num_mirror_holes"],
-                    "type": entry["params"]["taper_type"],
-                    "min_a%": entry["params"]["min_a_percent"],
-                    "min_hole%": entry["params"].get("min_hole_percent", 100),
-                },
-                "Q": f"{entry['result']['Q']:,}",
-                "V": f"{entry['result']['V']:.3f}",
-                "Q/V": f"{entry['result']['qv_ratio']:,}",
-            })
+            summary.append(
+                {
+                    "iteration": entry["iteration"],
+                    "params": {
+                        "taper": entry["params"]["num_taper_holes"],
+                        "mirror": entry["params"]["num_mirror_holes"],
+                        "type": entry["params"]["taper_type"],
+                        "min_a%": entry["params"]["min_a_percent"],
+                        "min_hole%": entry["params"].get("min_hole_percent", 100),
+                    },
+                    "Q": f"{entry['result']['Q']:,}",
+                    "V": f"{entry['result']['V']:.3f}",
+                    "Q/V": f"{entry['result']['qv_ratio']:,}",
+                }
+            )
 
         return {
             "total_designs": len(self.state.design_history),
             "showing": len(summary),
             "history": summary,
-            "best_iteration": self.state.best_design["iteration"] if self.state.best_design else None,
+            "best_iteration": (
+                self.state.best_design["iteration"] if self.state.best_design else None
+            ),
         }
 
     def _compare_designs(self, params):
@@ -448,20 +617,28 @@ Be systematic. Track what you've tried. Form hypotheses and test them."""
         designs = []
 
         for i in iterations:
-            entry = next((d for d in self.state.design_history if d["iteration"] == i), None)
+            entry = next(
+                (d for d in self.state.design_history if d["iteration"] == i), None
+            )
             if entry:
-                designs.append({
-                    "iteration": i,
-                    "params": entry["params"],
-                    "Q": entry["result"]["Q"],
-                    "V": entry["result"]["V"],
-                    "qv_ratio": entry["result"]["qv_ratio"],
-                })
+                designs.append(
+                    {
+                        "iteration": i,
+                        "params": entry["params"],
+                        "Q": entry["result"]["Q"],
+                        "V": entry["result"]["V"],
+                        "qv_ratio": entry["result"]["qv_ratio"],
+                    }
+                )
             else:
                 designs.append({"iteration": i, "error": "Not found"})
 
         # Compute differences if comparing 2 designs
-        if len(designs) == 2 and "error" not in designs[0] and "error" not in designs[1]:
+        if (
+            len(designs) == 2
+            and "error" not in designs[0]
+            and "error" not in designs[1]
+        ):
             d1, d2 = designs
             diff = {
                 "Q_change": f"{(d2['Q'] - d1['Q']) / d1['Q'] * 100:+.1f}%",

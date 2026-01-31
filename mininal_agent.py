@@ -13,12 +13,11 @@ LUMPAPI_PATH = os.getenv("LUMPAPI_PATH")
 
 if not ANTHROPIC_API_KEY:
     raise ValueError("ANTHROPIC_API_KEY not set in .env")
+if not LUMPAPI_PATH:
+    raise ValueError("LUMPAPI_PATH not set in .env")
 
 print(f"API Key loaded: {ANTHROPIC_API_KEY[:20]}...")
-if LUMPAPI_PATH:
-    print(f"Lumerical path: {LUMPAPI_PATH}")
-else:
-    print("Lumerical not configured - simulation will be skipped")
+print(f"Lumerical path: {LUMPAPI_PATH}")
 
 
 class CavityAgent:
@@ -318,7 +317,7 @@ class CavityAgent:
         hole_ry = self.unit_cell["ry"] * 1e6  # 100nm -> 0.1um
         wg_width = self.unit_cell["width"] * 1e6  # 450nm -> 0.45um
 
-        # Step 1: Build cavity GDS (2D - no height needed)
+        # Step 1: Build cavity GDS
         print(
             f"Building cavity: taper={num_taper_holes}, mirror={num_mirror_holes}, type={taper_type}, min_a={min_a_percent}%, min_hole={min_hole_percent}%"
         )
@@ -352,7 +351,7 @@ class CavityAgent:
             "material_lumerical": self.unit_cell["substrate_lumerical"],
         }
 
-        # Add wg_height for 3D simulation (not in GDS which is 2D)
+        # Add waveguide height for run_lumerical
         config["unit_cell"]["wg_height"] = self.unit_cell["height"] * 1e6  # in microns
 
         # Step 2: Run FDTD simulation
