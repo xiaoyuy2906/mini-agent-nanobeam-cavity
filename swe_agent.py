@@ -23,54 +23,6 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 if not ANTHROPIC_API_KEY:
     raise ValueError("ANTHROPIC_API_KEY not set in .env")
 
-# Optional calibration dataset (JSON). If present, will scale Q/V estimates.
-CALIBRATION_PATH = os.getenv("CAVITY_CALIBRATION_PATH", "calibration_data.json")
-
-
-def _load_calibration_samples(path):
-    if not os.path.exists(path):
-        return None
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        samples = data.get("samples", [])
-        return samples if samples else None
-    except (OSError, json.JSONDecodeError):
-        return None
-
-
-def _compute_calibration(samples, unit_cell):
-    """
-    Compute scale factors for Q and V from measured data.
-    Each sample should contain:
-      - design_params
-      - measured_q
-      - measured_v
-    """
-    q_scales = []
-    v_scales = []
-    for sample in samples:
-        params = sample.get("design_params", {})
-        measured_q = sample.get("measured_q")
-        measured_v = sample.get("measured_v")
-        if measured_q is None or measured_v is None:
-            continue
-
-        est = _estimate_base_performance(unit_cell, params)
-        if est["Q"] > 0 and est["V"] > 0:
-            q_scales.append(measured_q / est["Q"])
-            v_scales.append(measured_v / est["V"])
-
-    if not q_scales or not v_scales:
-        return None
-
-    return {
-        "scale_q": float(np.median(q_scales)),
-        "scale_v": float(np.median(v_scales)),
-        "num_samples": min(len(q_scales), len(v_scales)),
-    }
-
-
 class CavityDesignState:
     """Persistent state tracking for the agent"""
 
@@ -108,107 +60,6 @@ class CavityDesignState:
         }
 
 
-def _estimate_base_performance(unit_cell, design_params):
-    """
-    Analytical estimation of Q factor and mode volume.
-    This is a simplified model for iteration without Lumerical.
-
-    Physics-based heuristics:
-    - More taper holes → higher Q (better mode matching) but larger V
-    - Smaller min_a_percent → stronger confinement → higher Q, smaller V
-    - Quadratic taper generally better than linear
-    - Q/V is the figure of merit for light-matter interaction
-    """
-    num_taper = design_params.get("num_taper_holes", 8)
-    num_mirror = design_params.get("num_mirror_holes", 10)
-    min_a_percent = design_params.get("min_a_percent", 90)
-    min_hole_percent = design_params.get("min_hole_percent", 100)
-    taper_type = design_params.get("taper_type", "quadratic")
-
-    # Base Q from mirror holes (exponential increase with mirrors)
-    base_q = 1000 * (1.5 ** min(num_mirror, 15))  # saturates around 15
-
-    # Taper contribution to Q (better mode matching)
-    taper_factor = 1 + 0.1 * num_taper
-
-    # Stronger chirp (lower min_a_percent) increases Q
-    chirp_strength = (100 - min_a_percent) / 100
-    chirp_factor = 1 + 2 * chirp_strength
-
-    # Taper profile effect
-    profile_factors = {"linear": 0.8, "quadratic": 1.0, "cubic": 1.1}
-    profile_factor = profile_factors.get(taper_type, 1.0)
-
-    # Hole chirp can help but is secondary
-    hole_chirp = (100 - min_hole_percent) / 100
-    hole_factor = 1 + 0.5 * hole_chirp
-
-    # Estimated Q
-    Q = base_q * taper_factor * chirp_factor * profile_factor * hole_factor
-
-    # Mode volume estimation (in units of (λ/n)^3)
-    # Base mode volume from waveguide dimensions
-    wavelength = unit_cell.get("design_wavelength", 737e-9)
-    n_eff = 1.8  # effective index for SiN
-
-    # Mode volume increases with taper region size
-    lambda_n = wavelength / n_eff
-    base_v = 0.5  # ~0.5 (λ/n)^3 for well-designed cavity
-
-    # More taper holes = larger mode volume
-    v_taper_factor = 1 + 0.05 * num_taper
-
-    # Stronger chirp = smaller mode volume (tighter confinement)
-    v_chirp_factor = 1 - 0.3 * chirp_strength
-
-    V = base_v * v_taper_factor * v_chirp_factor
-    V = max(V, 0.1)  # minimum physical mode volume
-
-    # Q/V ratio (figure of merit)
-    qv_ratio = Q / V
-
-    # Add some noise to simulate real variation
-    noise = 1 + 0.05 * (np.random.random() - 0.5)
-    Q *= noise
-    V *= max(0.9, noise)
-
-    return {
-        "Q": int(Q),
-        "V": round(V, 3),
-        "qv_ratio": int(Q / V),
-        "resonance_wavelength_nm": round(
-            wavelength * 1e9 * (1 + 0.01 * (np.random.random() - 0.5)), 1
-        ),
-        "notes": [
-            f"Mirror holes: {num_mirror} (Q contribution: {base_q:.0f})",
-            f"Taper profile: {taper_type} (factor: {profile_factor})",
-            f"Period chirp: {100-min_a_percent}% (stronger = higher Q, smaller V)",
-        ],
-    }
-
-
-def estimate_cavity_performance(unit_cell, design_params, calibration=None):
-    """
-    Estimate Q/V using heuristics, optionally scaled by calibration data.
-    """
-    base = _estimate_base_performance(unit_cell, design_params)
-    if not calibration:
-        return base
-
-    scale_q = calibration.get("scale_q", 1.0)
-    scale_v = calibration.get("scale_v", 1.0)
-    q = int(base["Q"] * scale_q)
-    v = round(base["V"] * scale_v, 3)
-    base["Q"] = q
-    base["V"] = v
-    base["qv_ratio"] = int(q / v) if v > 0 else 0
-    base["notes"] = base["notes"] + [
-        f"Calibration: scale_q={scale_q:.3f}, scale_v={scale_v:.3f}",
-        f"Calibration samples: {calibration.get('num_samples', 0)}",
-    ]
-    return base
-
-
 class SWECavityAgent:
     """SWE-Agent style cavity designer with thought-action-observation loop"""
 
@@ -216,54 +67,46 @@ class SWECavityAgent:
         self.client = Anthropic(api_key=api_key)
         self.state = CavityDesignState()
         self.conversation_history = []
-        self.calibration_samples = _load_calibration_samples(CALIBRATION_PATH)
-        self.calibration = None
 
         self.system_prompt = self._build_system_prompt()
         self.tools = self._define_tools()
 
     def _build_system_prompt(self):
-        return """You are an expert nanobeam photonic cavity designer operating in a thought-action-observation loop.
+        return """You are an expert nanobeam photonic crystal cavity designer. You must follow a single-step tool call loop.
 
-## YOUR WORKFLOW
+## Workflow Rules
+Each turn must strictly output:
+1) **THOUGHT**: Reason about the next action based on current state
+2) **ACTION**: Call exactly one tool
+3) **OBSERVATION**: Receive the result, then continue
 
-For each turn, you MUST follow this pattern:
-
-1. **THOUGHT**: Reason about the current state and what to do next
-   - What do you know so far?
-   - What is the goal?
-   - What action makes sense?
-
-2. **ACTION**: Call exactly ONE tool
-
-3. **OBSERVATION**: You will receive the tool result, then think again
-
-## GOAL
-Maximize Q/V (quality factor / mode volume) for strong light-matter interaction.
+## Goal
+Maximize Q/V (figure of merit for strong light-matter interaction)
 - Q > 10,000 is good, Q > 100,000 is excellent
 - V < 1.0 (λ/n)³ is good, V < 0.5 is excellent
-- Q/V > 100,000 is a good target
+- Q/V > 100,000 is a strong target
 
-## TOOLS AVAILABLE
-- `set_unit_cell`: Configure the base waveguide/hole parameters (MUST do first)
-- `design_cavity`: Create a cavity design and get estimated Q/V
-- `view_history`: See all previous designs and their results
-- `compare_designs`: Compare specific designs side by side
-- `get_best_design`: Get the current best design
+## Tools
+- `set_unit_cell`: Configure the unit cell (must be called first)
+- `design_cavity`: Build the cavity and run FDTD to get Q/V
+- `view_history`: Inspect previous designs
+- `compare_designs`: Compare specific iterations
+- `get_best_design`: Retrieve the current best design
 
-## DESIGN STRATEGY
-1. Start with conservative parameters (8 taper, 10 mirror, 90% min_a)
-2. Analyze results and form hypothesis
-3. Try ONE change at a time to understand its effect
-4. Iterate towards higher Q/V
+## Design Strategy (must follow)
+1) Fix unit-cell geometry and target wavelength first
+2) Use FDTD as the only performance source (no heuristics)
+3) First sweep taper holes and mirror holes only; chirp form is fixed to quadratic
+4) Only adjust min_a_percent after testing taper/mirror changes
+5) If the simulated resonance is far from the target, adjust the period to re-center it
+6) Record Q, V, Q/V, and resonance wavelength; use history for comparisons
 
-## KEY PHYSICS
-- More taper holes: increases Q but also V (usually improves Q/V)
-- Lower min_a_percent: stronger confinement, higher Q, smaller V
-- More mirror holes: higher Q (saturates ~12-15)
-- Quadratic taper is usually optimal
+## Physics Notes (trend guidance only)
+- Increasing taper holes usually increases Q and also increases V
+- Quadratic chirp is mandatory; use min_a to adjust confinement
+- More mirror holes increase Q but saturate (typically ~12-15)
 
-Be systematic. Track what you've tried. Form hypotheses and test them."""
+Requirement: be systematic, reproducible, and comparable across runs."""
 
     def _define_tools(self):
         return [
@@ -327,33 +170,25 @@ Be systematic. Track what you've tried. Form hypotheses and test them."""
             },
             {
                 "name": "design_cavity",
-                "description": "Design a cavity with given parameters and get estimated Q/V performance.",
+                "description": "Design a cavity and run Lumerical FDTD for Q/V performance.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
                         "num_taper_holes": {
                             "type": "integer",
-                            "description": "Number of taper holes per side (typically 5-15)",
+                            "description": "Number of taper/chirp holes per side (typically 5-15)",
                         },
                         "num_mirror_holes": {
                             "type": "integer",
                             "description": "Number of mirror holes per side (typically 8-15)",
                         },
-                        "taper_type": {
-                            "type": "string",
-                            "enum": ["linear", "quadratic", "cubic"],
-                        },
                         "min_a_percent": {
                             "type": "number",
-                            "description": "Minimum period at center as % of original (70-95)",
+                            "description": "Minimum period at center as % of original (85-95)",
                         },
                         "min_hole_percent": {
                             "type": "number",
-                            "description": "Minimum hole size at center as % (70-100)",
-                        },
-                        "use_fdtd": {
-                            "type": "boolean",
-                            "description": "If true, run Lumerical FDTD for real Q/V",
+                            "description": "Minimum hole size at center as % (90-100)",
                         },
                         "mesh_accuracy": {
                             "type": "integer",
@@ -367,7 +202,6 @@ Be systematic. Track what you've tried. Form hypotheses and test them."""
                     "required": [
                         "num_taper_holes",
                         "num_mirror_holes",
-                        "taper_type",
                         "min_a_percent",
                     ],
                 },
@@ -449,10 +283,6 @@ Be systematic. Track what you've tried. Form hypotheses and test them."""
             "substrate": substrate,
             "substrate_lumerical": substrate_map.get(substrate),
         }
-        if self.calibration_samples:
-            self.calibration = _compute_calibration(
-                self.calibration_samples, self.state.unit_cell
-            )
         return {
             "status": "success",
             "message": "Unit cell configured",
@@ -471,7 +301,7 @@ Be systematic. Track what you've tried. Form hypotheses and test them."""
         design_params = {
             "num_taper_holes": params["num_taper_holes"],
             "num_mirror_holes": params["num_mirror_holes"],
-            "taper_type": params.get("taper_type", "quadratic"),
+            "taper_type": "quadratic",
             "min_a_percent": params["min_a_percent"],
             "min_hole_percent": params.get("min_hole_percent", 100),
         }
@@ -496,55 +326,44 @@ Be systematic. Track what you've tried. Form hypotheses and test them."""
         except Exception as e:
             gds_file = f"Error: {e}"
 
-        # Real FDTD simulation (optional)
-        use_fdtd = (
-            params.get("use_fdtd", False) or os.getenv("USE_LUMERICAL_REAL") == "1"
-        )
+        # Real FDTD simulation (required)
         mesh_accuracy = params.get("mesh_accuracy", 8)
-        fdtd_result = None
+        if not isinstance(gds_file, str) or gds_file.startswith("Error"):
+            return {"error": f"GDS build failed: {gds_file}"}
 
-        if use_fdtd and isinstance(gds_file, str) and not gds_file.startswith("Error"):
-            config = cavity.get_config()
-            config["unit_cell"]["wg_height"] = self.state.unit_cell["wg_height"] * 1e6
-            config["wavelength"] = {
-                "design_wavelength": self.state.unit_cell["design_wavelength"],
-                "wavelength_span": self.state.unit_cell["wavelength_span"],
-            }
-            config["substrate"] = {
-                "freestanding": self.state.unit_cell["freestanding"],
-                "material": self.state.unit_cell["substrate"],
-                "material_lumerical": self.state.unit_cell["substrate_lumerical"],
-            }
-            try:
-                fdtd_result = run_fdtd_simulation(
-                    config, mesh_accuracy=mesh_accuracy, run=True
-                )
-            except Exception as e:
-                fdtd_result = {"error": str(e)}
+        config = cavity.get_config()
+        config["unit_cell"]["wg_height"] = self.state.unit_cell["wg_height"] * 1e6
+        config["wavelength"] = {
+            "design_wavelength": self.state.unit_cell["design_wavelength"],
+            "wavelength_span": self.state.unit_cell["wavelength_span"],
+        }
+        config["substrate"] = {
+            "freestanding": self.state.unit_cell["freestanding"],
+            "material": self.state.unit_cell["substrate"],
+            "material_lumerical": self.state.unit_cell["substrate_lumerical"],
+        }
+        try:
+            fdtd_result = run_fdtd_simulation(
+                config, mesh_accuracy=mesh_accuracy, run=True
+            )
+        except Exception as e:
+            return {"error": f"FDTD failed: {e}"}
 
-        # Estimate performance (fallback or for fast iteration)
-        performance = estimate_cavity_performance(
-            self.state.unit_cell, design_params, calibration=self.calibration
-        )
+        if not fdtd_result or not fdtd_result.get("Q") or not fdtd_result.get("V"):
+            return {"error": f"FDTD returned invalid result: {fdtd_result}"}
 
-        # Override with FDTD values if available
-        if fdtd_result and fdtd_result.get("Q") and fdtd_result.get("V"):
-            # Get resonance wavelength
-            if fdtd_result.get("resonance_wavelength"):
-                res_wl = fdtd_result["resonance_wavelength"]
-                performance["resonance_wavelength_nm"] = float(np.round(res_wl * 1e9, 2))
-            else:
-                res_wl = self.state.unit_cell["design_wavelength"]
+        if fdtd_result.get("resonance_nm") is not None:
+            resonance_nm = float(np.round(fdtd_result["resonance_nm"], 2))
+        else:
+            resonance_nm = float(np.round(self.state.unit_cell["design_wavelength"] * 1e9, 2))
 
-            # Normalize V from m³ to (λ/n)³ units
-            n_eff = 2.0  # approximate effective index for SiN
-            lambda_n_cubed = (res_wl / n_eff) ** 3
-            v_normalized = fdtd_result["V"] / lambda_n_cubed
-
-            performance["Q"] = int(fdtd_result["Q"])
-            performance["V"] = float(np.round(v_normalized, 3))
-            performance["qv_ratio"] = int(fdtd_result["Q"] / v_normalized)
-            performance["notes"] = [f"FDTD result at {performance['resonance_wavelength_nm']} nm"]
+        performance = {
+            "Q": int(fdtd_result["Q"]),
+            "V": float(np.round(fdtd_result["V"], 3)),
+            "qv_ratio": int(fdtd_result["Q"] / fdtd_result["V"]),
+            "resonance_wavelength_nm": resonance_nm,
+            "notes": [f"FDTD result at {resonance_nm} nm"],
+        }
 
         # Record in history
         result = {
@@ -656,7 +475,7 @@ Be systematic. Track what you've tried. Form hypotheses and test them."""
         return {
             "best_design": self.state.best_design,
             "total_iterations": self.state.iteration,
-            "improvement_potential": "Try: more taper holes, lower min_a_percent, or cubic taper",
+            "improvement_potential": "Try: more taper holes, lower min_a_percent",
         }
 
     def chat(self, user_message):

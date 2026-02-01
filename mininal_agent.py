@@ -74,9 +74,10 @@ class CavityAgent:
             "\n"
             "OPTIMIZATION STRATEGY (if Q/V is not ideal):\n"
             "1. Increase num_taper_holes (e.g., 10, 12, 15...)\n"
-            "2. Decrease min_a_percent (e.g., 85, 80, 75...)\n"
-            "3. Only add hole chirp (min_hole_percent < 100) as a last resort\n"
-            "4. These are starting points, not limits. Explore freely.\n"
+            "2. Increase num_mirror_holes (e.g., 12, 14, 16...)\n"
+            "3. Only then adjust min_a_percent (e.g., 85, 80, 75...)\n"
+            "4. Only add hole chirp (min_hole_percent < 100) as a last resort\n"
+            "5. These are starting points, not limits. Explore freely.\n"
         )
 
         self.tools = [
