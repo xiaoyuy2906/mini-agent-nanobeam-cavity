@@ -72,41 +72,52 @@ class SWECavityAgent:
         self.tools = self._define_tools()
 
     def _build_system_prompt(self):
-        return """You are an expert nanobeam photonic crystal cavity designer. You must follow a single-step tool call loop.
+        try:
+            with open("./skills.md", "r", encoding="utf-8") as f:
+                skills_text = f.read().strip()
+        except OSError:
+            skills_text = ""
 
-## Workflow Rules
-Each turn must strictly output:
-1) **THOUGHT**: Reason about the next action based on current state
-2) **ACTION**: Call exactly one tool
-3) **OBSERVATION**: Receive the result, then continue
-
-## Goal
-Maximize Q/V (figure of merit for strong light-matter interaction)
-- Q > 10,000 is good, Q > 100,000 is excellent
-- V < 1.0 (λ/n)³ is good, V < 0.5 is excellent
-- Q/V > 100,000 is a strong target
-
-## Tools
-- `set_unit_cell`: Configure the unit cell (must be called first)
-- `design_cavity`: Build the cavity and run FDTD to get Q/V
-- `view_history`: Inspect previous designs
-- `compare_designs`: Compare specific iterations
-- `get_best_design`: Retrieve the current best design
-
-## Design Strategy (must follow)
-1) Fix unit-cell geometry and target wavelength first
-2) Use FDTD as the only performance source (no heuristics)
-3) First sweep taper holes and mirror holes only; chirp form is fixed to quadratic
-4) Only adjust min_a_percent after testing taper/mirror changes
-5) If the simulated resonance is far from the target, adjust the period to re-center it
-6) Record Q, V, Q/V, and resonance wavelength; use history for comparisons
-
-## Physics Notes (trend guidance only)
-- Increasing taper holes usually increases Q and also increases V
-- Quadratic chirp is mandatory; use min_a to adjust confinement
-- More mirror holes increase Q but saturate (typically ~12-15)
-
-Requirement: be systematic, reproducible, and comparable across runs."""
+        base_prompt = (
+            "You are an expert nanobeam photonic crystal cavity designer. You must follow a single-step tool call loop.\n"
+            "\n"
+            "## Workflow Rules\n"
+            "Each turn must strictly output:\n"
+            "1) **THOUGHT**: Reason about the next action based on current state\n"
+            "2) **ACTION**: Call exactly one tool\n"
+            "3) **OBSERVATION**: Receive the result, then continue\n"
+            "\n"
+            "## Goal\n"
+            "Maximize Q/V (figure of merit for strong light-matter interaction)\n"
+            "- Q > 10,000 is good, Q > 100,000 is excellent\n"
+            "- V < 1.0 (λ/n)³ is good, V < 0.5 is excellent\n"
+            "- Q/V > 100,000 is a strong target\n"
+            "\n"
+            "## Tools\n"
+            "- `set_unit_cell`: Configure the unit cell (must be called first)\n"
+            "- `design_cavity`: Build the cavity and run FDTD to get Q/V\n"
+            "- `view_history`: Inspect previous designs\n"
+            "- `compare_designs`: Compare specific iterations\n"
+            "- `get_best_design`: Retrieve the current best design\n"
+            "\n"
+            "## Design Strategy (must follow)\n"
+            "1) Fix unit-cell geometry and target wavelength first\n"
+            "2) Use FDTD as the only performance source (no heuristics)\n"
+            "3) First sweep taper holes and mirror holes only; chirp form is fixed to quadratic\n"
+            "4) If the simulated resonance is far from the target, adjust the period to re-center it\n"
+            "5) Only adjust min_a_percent after testing taper/mirror changes\n"
+            "6) Record Q, V, Q/V, and resonance wavelength; use history for comparisons\n"
+            "\n"
+            "## Physics Notes (trend guidance only)\n"
+            "- Increasing taper holes usually increases Q and also increases V\n"
+            "- Quadratic chirp is mandatory; use min_a to adjust confinement\n"
+            "- More mirror holes increase Q but saturate (typically ~12-15)\n"
+            "\n"
+            "Requirement: be systematic, reproducible, and comparable across runs."
+        )
+        if skills_text:
+            return skills_text
+        return base_prompt
 
     def _define_tools(self):
         return [
