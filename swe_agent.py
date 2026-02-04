@@ -23,6 +23,28 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 if not ANTHROPIC_API_KEY:
     raise ValueError("ANTHROPIC_API_KEY not set in .env")
 
+# Log file for storing iteration results
+LOG_FILE = "cavity_design_log.json"
+
+
+def _generate_config_key(unit_cell):
+    """Generate a unique key from unit_cell parameters for log matching"""
+    if not unit_cell:
+        return None
+    # Key fields that define a unique cavity configuration
+    key_fields = [
+        unit_cell.get("design_wavelength_nm", 0),
+        unit_cell.get("period", 0),
+        unit_cell.get("wg_width", 0),
+        unit_cell.get("wg_height", 0),
+        unit_cell.get("hole_rx", 0),
+        unit_cell.get("hole_ry", 0),
+        unit_cell.get("material", ""),
+        unit_cell.get("freestanding", True),
+    ]
+    return "_".join(str(v) for v in key_fields)
+
+
 class CavityDesignState:
     """Persistent state tracking for the agent"""
 
@@ -58,6 +80,69 @@ class CavityDesignState:
             "best_qv_ratio": self.best_qv_ratio,
             "designs_tried": len(self.design_history),
         }
+
+    def save_log(self, filepath=LOG_FILE):
+        """Save all iteration results to JSON log file"""
+        if not self.unit_cell:
+            return
+
+        config_key = _generate_config_key(self.unit_cell)
+        log_data = {
+            "config_key": config_key,
+            "unit_cell": self.unit_cell,
+            "best_qv_ratio": self.best_qv_ratio,
+            "best_design": self.best_design,
+            "iteration": self.iteration,
+            "design_history": self.design_history,
+            "last_updated": datetime.now().isoformat(),
+        }
+
+        # Load existing logs and update/append
+        all_logs = {}
+        if os.path.exists(filepath):
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    all_logs = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                all_logs = {}
+
+        # Store by config_key
+        all_logs[config_key] = log_data
+
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(all_logs, f, indent=2, default=str)
+
+        print(f"[LOG] Saved {self.iteration} iterations to {filepath}")
+
+    def load_log(self, unit_cell, filepath=LOG_FILE):
+        """Load previous results if same configuration exists"""
+        if not os.path.exists(filepath):
+            return False
+
+        config_key = _generate_config_key(unit_cell)
+        if not config_key:
+            return False
+
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                all_logs = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return False
+
+        if config_key not in all_logs:
+            return False
+
+        # Restore state from log
+        log_data = all_logs[config_key]
+        self.unit_cell = log_data.get("unit_cell")
+        self.best_qv_ratio = log_data.get("best_qv_ratio", 0)
+        self.best_design = log_data.get("best_design")
+        self.iteration = log_data.get("iteration", 0)
+        self.design_history = log_data.get("design_history", [])
+
+        print(f"[LOG] Loaded {self.iteration} previous iterations from {filepath}")
+        print(f"[LOG] Best Q/V so far: {self.best_qv_ratio:,.0f}")
+        return True
 
 
 class SWECavityAgent:
@@ -129,7 +214,7 @@ class SWECavityAgent:
                     "properties": {
                         "design_wavelength_nm": {
                             "type": "number",
-                            "description": "Target wavelength in nm (e.g., 737 for SiV, 637 for NV)",
+                            "description": "Target resonance wavelength in nm",
                         },
                         "wavelength_span_nm": {
                             "type": "number",
@@ -197,13 +282,13 @@ class SWECavityAgent:
                             "type": "number",
                             "description": "Minimum period at center as % of original (85-95)",
                         },
-                        "min_hole_percent": {
+                        "min_rx_percent": {
                             "type": "number",
-                            "description": "Minimum hole size at center as % (90-100)",
+                            "description": "Minimum hole x-radius at center as % of original (70-100)",
                         },
-                        "mesh_accuracy": {
-                            "type": "integer",
-                            "description": "FDTD mesh accuracy (1-8)",
+                        "min_ry_percent": {
+                            "type": "number",
+                            "description": "Minimum hole y-radius at center as % of original (70-100)",
                         },
                         "hypothesis": {
                             "type": "string",
@@ -281,7 +366,8 @@ class SWECavityAgent:
         }
 
         wavelength_span_nm = params.get("wavelength_span_nm", 100)
-        self.state.unit_cell = {
+        new_unit_cell = {
+            "design_wavelength_nm": params["design_wavelength_nm"],  # For log matching
             "design_wavelength": params["design_wavelength_nm"] * 1e-9,
             "wavelength_span": wavelength_span_nm * 1e-9,
             "period": params["period_nm"] * 1e-9,
@@ -294,14 +380,33 @@ class SWECavityAgent:
             "substrate": substrate,
             "substrate_lumerical": substrate_map.get(substrate),
         }
+
+        # Check if we have previous results for this configuration
+        loaded = self.state.load_log(new_unit_cell)
+        if not loaded:
+            self.state.unit_cell = new_unit_cell
+
+        message = "Unit cell configured"
+        if loaded:
+            message = f"Unit cell configured. Loaded {self.state.iteration} previous iterations (best Q/V: {self.state.best_qv_ratio:,.0f})"
+
         return {
             "status": "success",
-            "message": "Unit cell configured",
+            "message": message,
+            "previous_iterations": self.state.iteration if loaded else 0,
             "unit_cell": {
-                k: f"{v*1e9:.1f} nm" if isinstance(v, float) else v
+                k: (
+                    f"{v*1e9:.1f} nm"
+                    if isinstance(v, float) and k != "design_wavelength_nm"
+                    else v
+                )
                 for k, v in self.state.unit_cell.items()
             },
-            "next_step": "Now call design_cavity to create your first design",
+            "next_step": (
+                "Now call design_cavity to create your first design"
+                if not loaded
+                else "Continue optimizing or call get_best_design to see previous best"
+            ),
         }
 
     def _design_cavity(self, params):
@@ -314,7 +419,8 @@ class SWECavityAgent:
             "num_mirror_holes": params["num_mirror_holes"],
             "taper_type": "quadratic",
             "min_a_percent": params["min_a_percent"],
-            "min_hole_percent": params.get("min_hole_percent", 100),
+            "min_rx_percent": params.get("min_rx_percent", 100),
+            "min_ry_percent": params.get("min_ry_percent", 100),
         }
         hypothesis = params.get("hypothesis", "No hypothesis provided")
 
@@ -329,8 +435,8 @@ class SWECavityAgent:
                 num_mirror_holes=design_params["num_mirror_holes"],
                 taper_type=design_params["taper_type"],
                 min_a_percent=design_params["min_a_percent"],
-                min_rx_percent=design_params["min_hole_percent"],
-                min_ry_percent=design_params["min_hole_percent"],
+                min_rx_percent=design_params["min_rx_percent"],
+                min_ry_percent=design_params["min_ry_percent"],
                 save=True,
             )
             gds_file = cavity.gds_filepath
@@ -338,7 +444,7 @@ class SWECavityAgent:
             gds_file = f"Error: {e}"
 
         # Real FDTD simulation (required)
-        mesh_accuracy = params.get("mesh_accuracy", 8)
+        mesh_accuracy = 8  # Always use highest accuracy for reliable Q values
         if not isinstance(gds_file, str) or gds_file.startswith("Error"):
             return {"error": f"GDS build failed: {gds_file}"}
 
@@ -366,7 +472,9 @@ class SWECavityAgent:
         if fdtd_result.get("resonance_nm") is not None:
             resonance_nm = float(np.round(fdtd_result["resonance_nm"], 2))
         else:
-            resonance_nm = float(np.round(self.state.unit_cell["design_wavelength"] * 1e9, 2))
+            resonance_nm = float(
+                np.round(self.state.unit_cell["design_wavelength"] * 1e9, 2)
+            )
 
         performance = {
             "Q": int(fdtd_result["Q"]),
@@ -386,8 +494,14 @@ class SWECavityAgent:
         }
         self.state.add_design(design_params, result)
 
+        # Save log after each iteration
+        self.state.save_log()
+
         # Build observation
         is_best = result["qv_ratio"] >= self.state.best_qv_ratio
+
+        # Check targets - this tells the agent what phase we're in
+        target_status = self.check_targets(result)
 
         return {
             "iteration": self.state.iteration,
@@ -398,12 +512,14 @@ class SWECavityAgent:
                 "V": f"{performance['V']:.3f} (λ/n)³",
                 "Q/V": f"{performance['qv_ratio']:,}",
                 "resonance": f"{performance['resonance_wavelength_nm']} nm",
+                "target_wavelength": f"{self.state.unit_cell['design_wavelength'] * 1e9:.1f} nm",
             },
             "analysis": performance["notes"],
             "is_new_best": is_best,
             "best_qv_so_far": f"{self.state.best_qv_ratio:,}",
             "gds_file": gds_file,
             "fdtd_result": fdtd_result,
+            "TARGET_STATUS": target_status,
         }
 
     def _view_history(self, params):
@@ -425,11 +541,13 @@ class SWECavityAgent:
                         "mirror": entry["params"]["num_mirror_holes"],
                         "type": entry["params"]["taper_type"],
                         "min_a%": entry["params"]["min_a_percent"],
-                        "min_hole%": entry["params"].get("min_hole_percent", 100),
+                        "min_rx%": entry["params"].get("min_rx_percent", entry["params"].get("min_hole_percent", 100)),
+                        "min_ry%": entry["params"].get("min_ry_percent", entry["params"].get("min_hole_percent", 100)),
                     },
                     "Q": f"{entry['result']['Q']:,}",
                     "V": f"{entry['result']['V']:.3f}",
                     "Q/V": f"{entry['result']['qv_ratio']:,}",
+                    "resonance_nm": entry['result'].get('resonance_nm', 'N/A'),
                 }
             )
 
@@ -486,11 +604,138 @@ class SWECavityAgent:
         return {
             "best_design": self.state.best_design,
             "total_iterations": self.state.iteration,
-            "improvement_potential": "Try: more taper holes, lower min_a_percent",
+            "improvement_potential": "Try: more taper holes, lower min_a_percent, vary min_rx/min_ry",
         }
 
-    def chat(self, user_message):
+    def check_targets(self, result):
+        """
+        Check if design meets targets. Returns status dict.
+        PRIORITY: Resonance must be on-target before Q/V matters.
+        """
+        if not result or "resonance_nm" not in result:
+            return {"on_target": False, "phase": "no_result"}
+
+        target_nm = self.state.unit_cell["design_wavelength"] * 1e9
+        resonance_nm = result["resonance_nm"]
+        wavelength_diff = abs(resonance_nm - target_nm)
+
+        q_value = result.get("Q", 0)
+        v_value = result.get("V", 0)
+
+        # Phase 1: Resonance tuning (TOP PRIORITY)
+        if wavelength_diff > 5:
+            return {
+                "on_target": False,
+                "phase": "resonance_tuning",
+                "wavelength_diff_nm": wavelength_diff,
+                "target_nm": target_nm,
+                "resonance_nm": resonance_nm,
+                "direction": "increase_period" if resonance_nm < target_nm else "decrease_period",
+                "message": f"RESONANCE OFF BY {wavelength_diff:.1f}nm - IGNORE Q/V, FIX PERIOD FIRST"
+            }
+
+        # Phase 2: Q optimization (only when resonance is on target)
+        q_target = 1_000_000
+        if q_value < q_target:
+            return {
+                "on_target": False,
+                "phase": "q_optimization",
+                "wavelength_diff_nm": wavelength_diff,
+                "Q": q_value,
+                "Q_target": q_target,
+                "V": v_value,
+                "message": f"Resonance OK ({wavelength_diff:.1f}nm off). Q={q_value:,} < {q_target:,} target"
+            }
+
+        # All targets met
+        return {
+            "on_target": True,
+            "phase": "complete",
+            "Q": q_value,
+            "V": v_value,
+            "resonance_nm": resonance_nm,
+            "message": "ALL TARGETS MET!"
+        }
+
+    def run_optimization_loop(self, max_iterations=10):
+        """
+        Automated optimization loop that keeps iterating until targets are met.
+        After max_iterations, shows best result and asks user to continue.
+        """
+        if not self.state.unit_cell:
+            return {"error": "Must call set_unit_cell first via chat()"}
+
+        print(f"\n{'='*60}")
+        print(f"Starting automated optimization ({max_iterations} iterations)")
+        print(f"Target: resonance within ±5nm, Q > 1,000,000")
+        print(f"{'='*60}\n")
+
+        last_best_qv = self.state.best_qv_ratio
+
+        for i in range(max_iterations):
+            # Build prompt based on current state
+            if self.state.iteration == 0:
+                prompt = "Run the first baseline design with taper=8, mirror=10, min_a=90, min_rx=100, min_ry=100"
+            else:
+                # Get last result to inform next action
+                last_result = self.state.design_history[-1]["result"] if self.state.design_history else None
+                target_status = self.check_targets(last_result) if last_result else {"phase": "no_result"}
+
+                if target_status.get("on_target"):
+                    print(f"\n{'='*60}")
+                    print("ALL TARGETS MET!")
+                    print(f"{'='*60}\n")
+                    return {"status": "complete", "result": self._get_best_design()}
+
+                # Guide the agent based on phase
+                if target_status.get("phase") == "resonance_tuning":
+                    direction = target_status.get("direction", "adjust")
+                    diff = target_status.get("wavelength_diff_nm", 0)
+                    prompt = (
+                        f"RESONANCE OFF TARGET by {diff:.1f}nm. "
+                        f"You MUST {direction} to fix wavelength. "
+                        f"Adjust period by ~5-10nm in the right direction. "
+                        f"DO NOT change other parameters - only period matters now."
+                    )
+                else:
+                    # Check current taper holes from last design
+                    last_params = self.state.design_history[-1]["params"] if self.state.design_history else {}
+                    current_taper = last_params.get("num_taper_holes", 8)
+
+                    if current_taper < 14:
+                        prompt = (
+                            f"Resonance is on target. Q={target_status.get('Q', 0):,} (target: 1,000,000). "
+                            f"PRIORITY: Increase num_taper_holes (currently {current_taper}, try {current_taper + 2}). "
+                            f"Taper holes are MOST IMPORTANT for high Q. If resonance shifts, adjust period to compensate."
+                        )
+                    else:
+                        prompt = (
+                            f"Resonance is on target. Q={target_status.get('Q', 0):,} (target: 1,000,000). "
+                            f"Taper holes at {current_taper}. Try: more mirror holes, lower min_a%, or lower min_rx/ry%. "
+                            f"Change only ONE parameter. Check view_history to avoid repeating."
+                        )
+
+            print(f"\n--- Optimization iteration {i+1}/{max_iterations} ---")
+            print(f"Prompt: {prompt[:100]}...")
+
+            # Run one chat turn
+            response = self.chat(prompt)
+            print(f"Agent: {response[:200] if response else 'No response'}...")
+
+            # Check for improvement
+            if self.state.best_qv_ratio > last_best_qv:
+                last_best_qv = self.state.best_qv_ratio
+                print(f"[NEW BEST] Q/V = {last_best_qv:,}")
+
+        # Return status for the main loop to handle continuation
+        return {"status": "paused", "result": self._get_best_design()}
+
+    def chat(self, user_message, max_retries=3):
         """Main chat loop with thought-action-observation pattern"""
+        # Limit conversation history to last 20 messages to avoid context overflow
+        if len(self.conversation_history) > 20:
+            self.conversation_history = self.conversation_history[-20:]
+
         self.conversation_history.append({"role": "user", "content": user_message})
 
         # Add state context
@@ -501,13 +746,24 @@ class SWECavityAgent:
             "content": user_message + state_context,
         }
 
-        response = self.client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=4096,
-            system=self.system_prompt,
-            tools=self.tools,
-            messages=messages_with_state,
-        )
+        # Retry logic for transient API errors
+        for attempt in range(max_retries):
+            try:
+                response = self.client.messages.create(
+                    model="claude-sonnet-4-20250514",
+                    max_tokens=2048,
+                    system=self.system_prompt,
+                    tools=self.tools,
+                    messages=messages_with_state,
+                )
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    print(f"[RETRY] API error (attempt {attempt + 1}/{max_retries}): {e}")
+                    import time
+                    time.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s, 4s
+                else:
+                    raise
 
         # Tool use loop
         while response.stop_reason == "tool_use":
@@ -540,14 +796,24 @@ class SWECavityAgent:
                 }
             )
 
-            # Continue conversation
-            response = self.client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=4096,
-                system=self.system_prompt,
-                tools=self.tools,
-                messages=self.conversation_history,
-            )
+            # Continue conversation with retry logic
+            for attempt in range(max_retries):
+                try:
+                    response = self.client.messages.create(
+                        model="claude-sonnet-4-20250514",
+                        max_tokens=2048,
+                        system=self.system_prompt,
+                        tools=self.tools,
+                        messages=self.conversation_history,
+                    )
+                    break
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        print(f"[RETRY] API error (attempt {attempt + 1}/{max_retries}): {e}")
+                        import time
+                        time.sleep(2 ** attempt)
+                    else:
+                        raise
 
         # Extract final response
         final_response = next(
@@ -567,23 +833,108 @@ def main():
     print("=" * 60)
     print("\nThis agent uses a thought-action-observation loop to")
     print("systematically design and optimize photonic cavities.")
-    print("\nExample: 'Design a SiN cavity for SiV centers at 737nm'")
-    print("         'Optimize Q/V with 5 iterations'")
-    print("\nType 'quit' to exit.\n")
+    print("\nCommands:")
+    print("  'Design a SiN cavity at 737nm' - setup unit cell")
+    print("  'auto' or 'auto 15' - run automated optimization (default 10 iterations)")
+    print("  'quit' - exit")
+    print(f"\nResults are saved to {LOG_FILE}")
+    print("\nOptimization Priority:")
+    print("  1. Resonance within ±5nm of target (MUST meet first)")
+    print("  2. Q > 1,000,000")
+    print("  3. V < 0.5 (λ/n)³\n")
 
     agent = SWECavityAgent(api_key=ANTHROPIC_API_KEY)
 
-    while True:
-        user_input = input("You: ").strip()
-        if user_input.lower() in ["quit", "exit", "q"]:
-            break
-        if not user_input:
-            continue
+    def show_best_result():
+        """Display the current best design nicely"""
+        best = agent.state.best_design
+        if not best:
+            print("\nNo designs yet.")
+            return
 
-        print("\n" + "-" * 40)
-        response = agent.chat(user_input)
-        print("-" * 40)
-        print(f"\nAgent: {response}\n")
+        result = best["result"]
+        params = best["params"]
+        target_nm = agent.state.unit_cell["design_wavelength"] * 1e9
+        resonance_nm = result.get("resonance_nm", 0)
+        wavelength_diff = abs(resonance_nm - target_nm)
+
+        print(f"\n{'='*60}")
+        print("BEST DESIGN SO FAR")
+        print(f"{'='*60}")
+        print(f"  Iteration:    {best['iteration']}")
+        print(f"  Q:            {result['Q']:,}")
+        print(f"  V:            {result['V']:.3f} (λ/n)³")
+        print(f"  Q/V:          {result['qv_ratio']:,}")
+        print(f"  Resonance:    {resonance_nm:.2f} nm (target: {target_nm:.1f} nm, diff: {wavelength_diff:.1f} nm)")
+        print(f"  Parameters:   taper={params['num_taper_holes']}, mirror={params['num_mirror_holes']}, "
+              f"min_a={params['min_a_percent']}%")
+        print(f"                min_rx={params.get('min_rx_percent', 100)}%, "
+              f"min_ry={params.get('min_ry_percent', 100)}%")
+        print(f"  GDS file:     {result.get('gds_file', 'N/A')}")
+        print(f"{'='*60}")
+
+        # Show target status
+        target_status = agent.check_targets(result)
+        if target_status.get("on_target"):
+            print("STATUS: ALL TARGETS MET!")
+        elif target_status.get("phase") == "resonance_tuning":
+            print(f"STATUS: Resonance off by {wavelength_diff:.1f}nm - need to tune period")
+        else:
+            print(f"STATUS: Resonance OK, Q needs improvement ({result['Q']:,} / 1,000,000)")
+        print()
+
+    try:
+        while True:
+            user_input = input("You: ").strip()
+            if user_input.lower() in ["quit", "exit", "q"]:
+                break
+            if not user_input:
+                continue
+
+            # Check for auto mode
+            if user_input.lower().startswith("auto"):
+                parts = user_input.split()
+                max_iter = int(parts[1]) if len(parts) > 1 else 5
+
+                while True:
+                    result = agent.run_optimization_loop(max_iterations=max_iter)
+
+                    # Show best result
+                    show_best_result()
+
+                    # Check if targets met
+                    if result.get("status") == "complete":
+                        print("Optimization complete - all targets met!")
+                        break
+
+                    # Ask to continue
+                    print(f"Total iterations so far: {agent.state.iteration}")
+                    cont = input("Continue optimization? [y/N/number]: ").strip().lower()
+
+                    if cont in ["", "n", "no"]:
+                        print("Stopping optimization.")
+                        break
+                    elif cont in ["y", "yes"]:
+                        max_iter = 10  # Default batch size
+                    elif cont.isdigit():
+                        max_iter = int(cont)
+                    else:
+                        print("Stopping optimization.")
+                        break
+
+                continue
+
+            print("\n" + "-" * 40)
+            response = agent.chat(user_input)
+            print("-" * 40)
+            print(f"\nAgent: {response}\n")
+    finally:
+        # Save log on exit
+        if agent.state.unit_cell and agent.state.iteration > 0:
+            agent.state.save_log()
+            print(
+                f"\n[LOG] Final save: {agent.state.iteration} iterations saved to {LOG_FILE}"
+            )
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@ import lumapi
 # Output folder for FDTD files
 FDTD_OUTPUT_FOLDER = "fdtd_output"
 
-# Default wavelength (SiV) - used if not specified in config
+# Default wavelength - used if not specified in config
 DEFAULT_WAVELENGTH = 737e-9  # 737 nm
 DEFAULT_SPAN = 50e-9  # ±100 nm
 
@@ -178,6 +178,10 @@ def run_fdtd_simulation(config, mesh_accuracy=8, run=True):
     fdtd.set("x span", (cavity_length) * 0.75 * 1e-6)  # 75% of sim region
     fdtd.set("y", 0)
     fdtd.set("y span", (wg_width * 4) * 0.5 * 1e-6)  # 75% of sim region
+    fdtd.select("mode_volume::field")
+    fdtd.set("apodization", "Start")
+    fdtd.set("apodization center", 100e-15)  # 100fs
+    fdtd.set("apodization time width", 15e-15)
 
     # Z span similar to FDTD region, but scaled down
     if freestanding:
@@ -219,7 +223,11 @@ def run_fdtd_simulation(config, mesh_accuracy=8, run=True):
             spectrum = fdtd.getresult("Q_analysis", "spectrum")
 
             # Step 1: Find highest peak in spectrum
-            if isinstance(spectrum, dict) and "spectrum" in spectrum and "lambda" in spectrum:
+            if (
+                isinstance(spectrum, dict)
+                and "spectrum" in spectrum
+                and "lambda" in spectrum
+            ):
                 spectrum_array = np.array(spectrum["spectrum"]).flatten()
                 spectrum_lambda = np.array(spectrum["lambda"]).flatten()
 
@@ -229,11 +237,17 @@ def run_fdtd_simulation(config, mesh_accuracy=8, run=True):
                     peak_wavelength = float(spectrum_lambda[peak_idx])
                     peak_intensity = float(spectrum_array[peak_idx])
 
-                    print(f"Spectrum peak: {peak_wavelength * 1e9:.2f} nm (intensity: {peak_intensity:.2e})")
+                    print(
+                        f"Spectrum peak: {peak_wavelength * 1e9:.2f} nm (intensity: {peak_intensity:.2e})"
+                    )
                     print(f"Target wavelength: {design_wavelength * 1e9:.1f} nm")
 
                     # Step 2: Find Q at the peak wavelength
-                    if isinstance(q_result, dict) and "Q" in q_result and "lambda" in q_result:
+                    if (
+                        isinstance(q_result, dict)
+                        and "Q" in q_result
+                        and "lambda" in q_result
+                    ):
                         q_array = np.array(q_result["Q"]).flatten()
                         q_lambda = np.array(q_result["lambda"]).flatten()
 
@@ -244,12 +258,18 @@ def run_fdtd_simulation(config, mesh_accuracy=8, run=True):
                             resonance_wavelength = float(q_lambda[q_idx])
 
                             print(f"Found {len(q_array)} Q values")
-                            print(f"Q at peak: {q_value:.0f} at {resonance_wavelength * 1e9:.2f} nm")
+                            print(
+                                f"Q at peak: {q_value:.0f} at {resonance_wavelength * 1e9:.2f} nm"
+                            )
 
                             # Warn if peak is far from target
-                            deviation_nm = abs(resonance_wavelength - design_wavelength) * 1e9
+                            deviation_nm = (
+                                abs(resonance_wavelength - design_wavelength) * 1e9
+                            )
                             if deviation_nm > 50:
-                                print(f"WARNING: Resonance is {deviation_nm:.1f} nm from target!")
+                                print(
+                                    f"WARNING: Resonance is {deviation_nm:.1f} nm from target!"
+                                )
 
         except Exception as e:
             print(f"Q extraction error: {e}")
@@ -267,9 +287,11 @@ def run_fdtd_simulation(config, mesh_accuracy=8, run=True):
 
                 # Normalize: V / (λ/n)³
                 # λ in meters, V in m³ -> result is dimensionless
-                lambda_norm = resonance_wavelength if resonance_wavelength else design_wavelength
+                lambda_norm = (
+                    resonance_wavelength if resonance_wavelength else design_wavelength
+                )
                 lambda_over_n = lambda_norm / n_sin
-                v_normalized = v_raw / (lambda_over_n ** 3)
+                v_normalized = v_raw / (lambda_over_n**3)
                 v_value = v_normalized
 
                 print(f"Mode volume (raw): {v_raw:.3e} m³")
@@ -281,7 +303,9 @@ def run_fdtd_simulation(config, mesh_accuracy=8, run=True):
         result["simulation_completed"] = True
         result["Q"] = q_value
         result["V"] = v_value  # Now in (λ/n)³ units
-        result["resonance_nm"] = resonance_wavelength * 1e9 if resonance_wavelength else None
+        result["resonance_nm"] = (
+            resonance_wavelength * 1e9 if resonance_wavelength else None
+        )
         result["qv_ratio"] = (q_value / v_value) if q_value and v_value else None
 
     fdtd.close()
@@ -309,7 +333,7 @@ if __name__ == "__main__":
     # Add parameters that agent normally provides (not from build_gds)
     config["unit_cell"]["wg_height"] = 0.22  # 200nm in microns (for 3D simulation)
     config["wavelength"] = {
-        "design_wavelength": 737e-9,  # 737nm for SiV
+        "design_wavelength": 737e-9,  # 737nm target
         "wavelength_span": 100e-9,  # ±100nm
     }
     config["substrate"] = {
