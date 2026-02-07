@@ -5,7 +5,7 @@ An AI agent that designs and optimizes nanobeam photonic crystal cavities using 
 ## Overview
 
 This project implements an LLM-powered agent that:
-- Designs nanobeam photonic crystal cavities targeting specific wavelengths (e.g., 737nm for SiV, 637nm for NV centers)
+- Designs nanobeam photonic crystal cavities targeting user-specified wavelengths
 - Generates GDS layouts using gdsfactory
 - Runs Lumerical FDTD simulations to compute Q-factor and mode volume
 - Uses a thought-action-observation loop to systematically optimize designs
@@ -80,7 +80,7 @@ python swe_agent.py
 ```
 
 Example prompts:
-- "Design a SiN cavity for SiV centers at 737nm"
+- "Design a SiN cavity at 737nm"
 - "Optimize Q/V with 5 iterations"
 - "Compare the last 3 designs"
 
@@ -101,7 +101,7 @@ Example prompts:
 ### Unit Cell
 | Parameter | Description | Typical Values |
 |-----------|-------------|----------------|
-| `design_wavelength_nm` | Target resonance wavelength | 737 (SiV), 637 (NV) |
+| `design_wavelength_nm` | Target resonance wavelength | e.g., 737, 1550 |
 | `period_nm` | Lattice period | 200-300 |
 | `wg_width_nm` | Waveguide width | 400-600 |
 | `wg_height_nm` | Waveguide thickness | 200-300 |

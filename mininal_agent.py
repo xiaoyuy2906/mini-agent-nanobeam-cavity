@@ -42,15 +42,15 @@ class CavityAgent:
             "\n"
             "WORKFLOW:\n"
             "1. FIRST: Get unit cell and DESIGN WAVELENGTH from user:\n"
-            "   - design_wavelength_nm: CRITICAL! The target wavelength (e.g., 737 for SiV, 637 for NV)\n"
+            "   - design_wavelength_nm: CRITICAL! The target resonance wavelength in nm\n"
             "   - wavelength_span_nm: simulation range (default ±100nm)\n"
             "   - period (nm), wg_width (nm), wg_height (nm)\n"
             "   - hole_rx (nm), hole_ry (nm) - elliptical holes (rx=ry for round)\n"
             "   - material (SiN, Si, Diamond, GaAs)\n"
             "   - freestanding or on substrate?\n"
             "   Common platforms:\n"
-            "   - SiN freestanding for SiV (737nm)\n"
-            "   - Diamond freestanding for NV (637nm)\n"
+            "   - SiN freestanding\n"
+            "   - Diamond freestanding\n"
             "   - GaAs on Diamond\n"
             "   If not freestanding, ask about substrate material.\n"
             "   Call set_unit_cell tool.\n"
@@ -89,7 +89,7 @@ class CavityAgent:
                     "properties": {
                         "design_wavelength_nm": {
                             "type": "number",
-                            "description": "Target design wavelength in nanometers (e.g., 737 for SiV, 637 for NV center)",
+                            "description": "Target resonance wavelength in nanometers",
                         },
                         "wavelength_span_nm": {
                             "type": "number",
@@ -358,7 +358,7 @@ class CavityAgent:
         # Step 2: Run FDTD simulation
         print(f"Setting up FDTD simulation...")
         try:
-            result = run_fdtd_simulation(config, mesh_accuracy=4, run=run_simulation)
+            result = run_fdtd_simulation(config, mesh_accuracy=8, run=run_simulation)
             config["simulation"] = result
         except Exception as e:
             config["simulation"] = {"status": "error", "message": str(e)}

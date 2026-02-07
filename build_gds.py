@@ -287,19 +287,28 @@ class build_cavity_gds:
 
     def _generate_filename(self):
         """Generate filename based on key parameters"""
-        # Convert period to nm for filename (period is in microns)
+        # Convert to nm for filename (values are in microns)
         period_nm = int(self.period * 1000)
+        wg_width_nm = int(self.wg_width * 1000)
+        hole_rx_nm = int(self.hole_rx * 1000)
+        hole_ry_nm = int(self.hole_ry * 1000)
+
         name = (
             f"cavity_"
             f"p{period_nm}_"
+            f"w{wg_width_nm}_"
+            f"rx{hole_rx_nm}_"
+            f"ry{hole_ry_nm}_"
             f"t{self.num_taper_holes}_"
             f"m{self.num_mirror_holes}_"
-            f"{self.taper_type}_"
-            f"a{int(self.min_a_percent)}_"
-            f"rx{int(self.min_rx_percent)}_"
-            f"ry{int(self.min_ry_percent)}"
-            f".gds"
+            f"a{int(self.min_a_percent)}"
         )
+        # Only add taper rx/ry if not 100%
+        if int(self.min_rx_percent) != 100:
+            name += f"_trx{int(self.min_rx_percent)}"
+        if int(self.min_ry_percent) != 100:
+            name += f"_try{int(self.min_ry_percent)}"
+        name += ".gds"
         return name
 
     def save_gds(self, filename=None, folder=None):

@@ -113,6 +113,14 @@ def run_fdtd_simulation(config, mesh_accuracy=8, run=True):
     fdtd.set("x span", (cavity_length + 2) * 1e-6)  # cavity length + margin
     fdtd.set("y", 0)
     fdtd.set("y span", (wg_width * 4) * 1e-6)  # 4x waveguide width
+    # # FDTD simulation settings
+    # fdtd.set("simulation time", 10000e-15)  # 10 ps
+
+    # # Auto shutoff settings
+    # fdtd.set("use early shutoff", 1)
+    # fdtd.set("auto shutoff min", 1e-08)  #
+    # fdtd.set("auto shutoff max", 100)  #
+    # fdtd.set("down sample time", 50)  #
 
     # Z span depends on freestanding or with substrate
     if freestanding:
@@ -294,8 +302,8 @@ def run_fdtd_simulation(config, mesh_accuracy=8, run=True):
                 v_normalized = v_raw / (lambda_over_n**3)
                 v_value = v_normalized
 
-                print(f"Mode volume (raw): {v_raw:.3e} m³")
-                print(f"Mode volume (normalized): {v_normalized:.3f} (λ/n)³")
+                print(f"Mode volume (raw): {v_raw:.3e} m**3")
+                print(f"Mode volume (normalized): {v_normalized:.3f} (lambda/n)³")
         except Exception as e:
             print(f"Mode volume extraction error: {e}")
             v_value = None

@@ -6,28 +6,34 @@
 **DO NOT optimize Q/V until resonance is within ±5nm of target!**
 
 After EVERY `design_cavity` call, check `TARGET_STATUS` in the response:
-- If `phase: "resonance_tuning"` → ONLY adjust period, ignore Q/V completely
+- If `phase: "resonance_tuning"` → ONLY change `period_nm`, DO NOT change any other parameter!
 - If `phase: "q_optimization"` → Now you can optimize Q/V
+
+**RESONANCE TUNING RULES:**
+- Use `period_nm` parameter in `design_cavity` to adjust wavelength
+- Resonance too LOW → INCREASE period_nm (e.g., 225 → 250 → 275)
+- Resonance too HIGH → DECREASE period_nm
+- Keep ALL other parameters FIXED (taper, mirror, min_a, rx, ry)
+- DO NOT touch min_a_percent during resonance tuning!
 
 ### PHASE 2: Q/V OPTIMIZATION (only after resonance is on target)
 Once resonance is within ±5nm, optimize Q by varying:
-1. `num_taper_holes` (10→12→14→16) - **MOST IMPORTANT for high Q!**
-2. `num_mirror_holes` (12→14→16→18→20)
-3. `min_a_percent` (90→88→86→85)
-4. `min_rx_percent` (100→98→96)
-5. `min_ry_percent` (100→98→96)
+1. `num_taper_holes` (8→10→12)
+2. `num_mirror_holes` (5→7→10)
+3. `min_a_percent` (90→89→88→87, 1% steps) - **MOST IMPORTANT for Q**
+4. `min_rx_percent` = `min_ry_percent` = 100 (DO NOT change unless user explicitly requests)
+5. **IF Q is still far from 1,000,000 after trying 1-3**: STOP and ask user to check the unit cell design (period, hole sizes, waveguide dimensions may need adjustment)
 
 **CRITICAL**: When changing taper/mirror holes causes resonance to shift outside ±5nm:
 - DO NOT abandon the parameter change!
 - Instead: KEEP the new taper/mirror value AND adjust period to compensate
 - Example: t10 shifted resonance from 737→734nm? Try t10 with period+3nm to get back on target
-- More taper holes = much higher Q potential, so always push taper holes higher!
 
 ## RULE 1: Resonance Controls Everything
-- If |resonance - target| > 10nm → **STOP ALL Q OPTIMIZATION**
-- Resonance too LOW (blue-shifted) → INCREASE period by 5-10nm
-- Resonance too HIGH (red-shifted) → DECREASE period by 5-10nm
-- **PERIOD is the ONLY parameter that shifts wavelength significantly**
+- If |resonance - target| > 5nm → **STOP ALL Q OPTIMIZATION**
+- Resonance too LOW (blue-shifted) → INCREASE `period_nm` in design_cavity
+- Resonance too HIGH (red-shifted) → DECREASE `period_nm` in design_cavity
+- **ONLY change period_nm during resonance tuning - DO NOT change min_a_percent or anything else!**
 
 ## RULE 2: Never Repeat Parameters
 Every iteration must try NEW parameter values. Check `view_history` before designing.
@@ -46,10 +52,13 @@ START → set_unit_cell → design_cavity
             ↓                                   ↓
     phase="resonance_tuning"           phase="q_optimization"
             ↓                                   ↓
-    ONLY adjust period                 Optimize Q via (in order):
-    (ignore Q/V values!)               1. TAPER_HOLES (10→12→14→16)
-                                       2. mirror_holes (12→14→16→18→20)
-                                       3. min_a_percent, min_rx%, min_ry%
+    ONLY change period_nm!             Optimize Q via (STRICT ORDER):
+    (DO NOT touch min_a or             1. min_a_percent (90→89→88→87, 1% steps)
+     any other parameter!)             2. TAPER_HOLES (8→10→12)
+                                       3. mirror_holes (5→7→10)
+                                       4. min_rx=min_ry=100 (DO NOT change)
+                                       5. If Q still far from 1M after 1-3:
+                                          ASK USER to check unit cell design
 
     If a Q parameter shifts resonance out of ±5nm range:
     → Keep the parameter change, adjust period to compensate, then continue
@@ -59,14 +68,22 @@ START → set_unit_cell → design_cavity
 
 | To increase Q | Action | Priority |
 |---------------|--------|----------|
-| **MOST EFFECTIVE** | Add more taper holes (10→12→14→16) | **#1** |
-| Very effective | Add more mirror holes (12→14→16→20) | #2 |
-| Moderate | Lower min_a_percent (90→88→86→84) | #3 |
-| Fine-tune | Lower min_rx_percent (100→90→80) | #4 |
-| Fine-tune | Lower min_ry_percent (100→90→80) | #5 |
+| **MOST IMPORTANT** | Lower min_a_percent (90→89→88→87, 1% steps) | **#1** |
+| Moderate | Add more taper holes (8→10→12) | #2 |
+| Moderate | Add more mirror holes (5→7→10) | #3 |
+| User-only | min_rx/ry_percent - keep at 100 unless user requests | #4 |
 
-**NOTE**: Taper holes control mode matching - more tapers = gentler transition = higher Q!
-Always try to push taper holes to 12-16 before concluding optimization.
+## CRITICAL: User-Only Parameters
+
+**DO NOT change these parameters unless the user EXPLICITLY requests it:**
+
+1. `min_rx_percent`, `min_ry_percent` - Keep at 100 by default
+2. `wg_width_nm` - Waveguide width (only change if user requests sweep)
+3. `hole_rx_nm`, `hole_ry_nm` - Mirror hole dimensions (only change if user requests sweep)
+
+These parameters significantly affect mode confinement. The user checks E field profiles manually.
+
+**NOTE**: Taper holes control mode matching. Use 8-12 taper holes typically.
 
 | To shift resonance | Action |
 |--------------------|--------|
