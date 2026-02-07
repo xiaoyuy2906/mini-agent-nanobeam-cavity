@@ -218,7 +218,7 @@ class SWECavityAgent:
             "\n"
             "## Goal\n"
             "Maximize Q/V (figure of merit for strong light-matter interaction)\n"
-            "- Q > 10,000 is good, Q > 100,000 is excellent\n"
+            "- Q > 10,000 is good, Q > 1,000,000 is excellent\n"
             "- V < 1.0 (λ/n)³ is good, V < 0.5 is excellent\n"
             "- Q/V > 100,000 is a strong target\n"
             "\n"
@@ -1153,7 +1153,7 @@ def main():
             # Check for auto mode
             if user_input.lower().startswith("auto"):
                 parts = user_input.split()
-                max_iter = int(parts[1]) if len(parts) > 1 else 5
+                max_iter = int(parts[1]) if len(parts) > 1 else 10
 
                 while True:
                     result = agent.run_optimization_loop(max_iterations=max_iter)

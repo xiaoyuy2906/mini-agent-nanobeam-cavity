@@ -21,7 +21,7 @@ FDTD_OUTPUT_FOLDER = "fdtd_output"
 
 # Default wavelength - used if not specified in config
 DEFAULT_WAVELENGTH = 737e-9  # 737 nm
-DEFAULT_SPAN = 50e-9  # ±100 nm
+DEFAULT_SPAN = 50e-9  # ±50 nm
 
 
 def run_fdtd_simulation(config, mesh_accuracy=8, run=True):
