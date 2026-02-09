@@ -17,10 +17,10 @@ After EVERY `design_cavity` call, check `TARGET_STATUS` in the response:
 - DO NOT touch min_a_percent during resonance tuning!
 
 ### PHASE 2: Q/V OPTIMIZATION (only after resonance is on target)
-Once resonance is within ±5nm, optimize Q by varying:
+Once resonance is within ±5nm, optimize Q by varying (in order):
 1. `num_taper_holes` (8→10→12)
 2. `num_mirror_holes` (5→7→10)
-3. `min_a_percent` (90→89→88→87, 1% steps) - **MOST IMPORTANT for Q**
+3. `min_a_percent` (90→89→88→87, 1% steps) - **MOST IMPORTANT for Q once taper/mirror are explored**
 4. `min_rx_percent` = `min_ry_percent` = 100 (DO NOT change unless user explicitly requests)
 5. **IF Q is still far from 1,000,000 after trying 1-3**: STOP and ask user to check the unit cell design (period, hole sizes, waveguide dimensions may need adjustment)
 
@@ -53,9 +53,9 @@ START → set_unit_cell → design_cavity
     phase="resonance_tuning"           phase="q_optimization"
             ↓                                   ↓
     ONLY change period_nm!             Optimize Q via (STRICT ORDER):
-    (DO NOT touch min_a or             1. min_a_percent (90→89→88→87, 1% steps)
-     any other parameter!)             2. TAPER_HOLES (8→10→12)
-                                       3. mirror_holes (5→7→10)
+    (DO NOT touch min_a or             1. TAPER_HOLES (8→10→12)
+     any other parameter!)             2. mirror_holes (5→7→10)
+                                       3. min_a_percent (90→89→88→87, 1% steps)
                                        4. min_rx=min_ry=100 (DO NOT change)
                                        5. If Q still far from 1M after 1-3:
                                           ASK USER to check unit cell design
@@ -68,9 +68,9 @@ START → set_unit_cell → design_cavity
 
 | To increase Q | Action | Priority |
 |---------------|--------|----------|
-| **MOST IMPORTANT** | Lower min_a_percent (90→89→88→87, 1% steps) | **#1** |
-| Moderate | Add more taper holes (8→10→12) | #2 |
-| Moderate | Add more mirror holes (5→7→10) | #3 |
+| **MOST IMPORTANT** | Lower min_a_percent (90→89→88→87, 1% steps) after taper/mirror sweeps | **#3** |
+| Moderate | Add more taper holes (8→10→12) | #1 |
+| Moderate | Add more mirror holes (5→7→10) | #2 |
 | User-only | min_rx/ry_percent - keep at 100 unless user requests | #4 |
 
 ## CRITICAL: User-Only Parameters

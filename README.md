@@ -121,7 +121,7 @@ Example prompts:
 
 | Metric | Good | Excellent |
 |--------|------|-----------|
-| Q-factor | > 10,000 | > 100,000 |
+| Q-factor | > 10,000 | > 1,000,000 |
 | Mode volume V | < 1.0 (λ/n)³ | < 0.5 (λ/n)³ |
 | Q/V | > 50,000 | > 100,000 |
 
