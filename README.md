@@ -9,6 +9,7 @@ This project implements an LLM-powered agent that:
 - Generates GDS layouts using gdsfactory
 - Runs Lumerical FDTD simulations to compute Q-factor and mode volume
 - Uses a thought-action-observation loop to systematically optimize designs
+- Supports both Claude and MiniMax models via Anthropic-compatible API
 
 ## Architecture
 
@@ -40,7 +41,9 @@ The agent follows the **SWE-agent pattern** (from Princeton NLP):
 ├─────────────────────────────────────────────────────────┤
 │  • Design history with parameters and results           │
 │  • Best design tracking (highest Q/V)                   │
-│  • Iteration count                                      │
+│  • Sweep step tracking with locked parameters           │
+│  • Duplicate detection to avoid wasted simulations      │
+│  • Log persistence across sessions (JSON)               │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -48,13 +51,13 @@ The agent follows the **SWE-agent pattern** (from Princeton NLP):
 
 - Python 3.13+
 - Lumerical FDTD (with Python API)
-- Anthropic API key
+- Anthropic API key (or MiniMax API key)
 
 ## Installation
 
 ```bash
 # Clone the repository
-git clone <repo-url>
+git clone https://github.com/xiaoyuy2906/mini-agent-nanobeam-cavity.git
 cd mini-agent-nanobeam-cavity
 
 # Install dependencies with uv
@@ -69,8 +72,13 @@ pip install -e .
 Create a `.env` file in the project root:
 
 ```env
-ANTHROPIC_API_KEY=your-api-key
-LUMPAPI_PATH=/path/to/lumerical/api/python
+# For Claude (default)
+ANTHROPIC_API_KEY=your-anthropic-key
+
+# For MiniMax
+MODEL_PROVIDER=minimax
+ANTHROPIC_API_KEY=your-minimax-key
+MODEL_NAME=MiniMax-M2.5-lightning
 ```
 
 ## Usage
@@ -79,21 +87,59 @@ LUMPAPI_PATH=/path/to/lumerical/api/python
 python swe_agent.py
 ```
 
-Example prompts:
-- "Design a SiN cavity at 737nm"
-- "Optimize Q/V with 5 iterations"
-- "Compare the last 3 designs"
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `Design a SiN cavity at 737nm` | Set up unit cell with natural language |
+| `confirm fdtd` | Confirm parameters before first simulation |
+| `auto` or `auto 15` | Run automated optimization loop (default 10 iterations) |
+| `auto 15 -- <instruction>` | Auto mode with additional constraints |
+| `sweep <param> from <start> to <end> [step <N>]` | Deterministic parameter sweep |
+| `quit` | Exit |
+
+### Sweep Examples
+
+```
+sweep num_taper_holes from 5 to 12
+sweep min_a_percent 87 90
+sweep hole_rx_nm from 80 to 100 step 5
+```
+
+### Three-Phase Optimization
+
+The agent follows a strict optimization protocol:
+
+1. **Phase 1 — Resonance Tuning**: Adjust `period_nm` until resonance is within ±5nm of target. No other parameters are changed.
+
+2. **Phase 2 — Q/V Optimization**: Sweep parameters one at a time in strict order:
+   - `min_a_percent` (90→89→88→87)
+   - `hole_rx_nm` (±5nm steps)
+   - Re-sweep `min_a_percent`
+   - `hole_ry_nm` (±5nm steps)
+   - Re-sweep `min_a_percent`
+   - `num_taper_holes` (8, 10, 12)
+   - Fine period sweep (±1–2nm)
+
+3. **Phase 3 — Fine Tuning**: Fine period sweep around the best design once Q > 100,000.
+
+### Sweep Enforcement
+
+The agent includes an **ENFORCE guard** that prevents the LLM from changing parameters outside the current sweep step. For example, during `sweep_min_a`, only `min_a_percent` and `period_nm` (for resonance re-tuning) can be modified. This prevents the LLM from confounding results by changing multiple variables at once.
+
+The `sweep` command bypasses this guard by temporarily setting the step to `manual` mode.
 
 ## Project Structure
 
 ```
 .
-├── swe_agent.py       # Main SWE-style agent with TAO loop
-├── build_gds.py       # GDS layout generation using gdsfactory
-├── run_lumerical.py   # Lumerical FDTD simulation interface
-├── skills.md          # Agent skill prompt (loaded into system prompt)
-├── gds_output/        # Generated GDS files
-└── fdtd_output/       # FDTD simulation files (.fsp)
+├── swe_agent.py          # Main SWE-style agent with TAO loop
+├── build_gds.py          # GDS layout generation using gdsfactory
+├── run_lumerical.py      # Lumerical FDTD simulation interface
+├── skills.md             # Agent skill prompt (optimization protocol)
+├── cavity_design_log.json # Persistent log of all iterations (auto-generated)
+├── gds_output/           # Generated GDS files
+└── fdtd_output/          # FDTD simulation files (.fsp)
 ```
 
 ## Design Parameters
@@ -102,43 +148,43 @@ Example prompts:
 | Parameter | Description | Typical Values |
 |-----------|-------------|----------------|
 | `design_wavelength_nm` | Target resonance wavelength | e.g., 737, 1550 |
-| `period_nm` | Lattice period | 200-300 |
-| `wg_width_nm` | Waveguide width | 400-600 |
-| `wg_height_nm` | Waveguide thickness | 200-300 |
-| `hole_rx_nm` | Hole radius (x) | 50-100 |
-| `hole_ry_nm` | Hole radius (y) | 80-150 |
-| `material` | Waveguide material | SiN, Si, Diamond, GaAs |
+| `period_nm` | Lattice period | 200–300 |
+| `wg_width_nm` | Waveguide width | 400–600 |
+| `wg_height_nm` | Waveguide thickness | 200–300 |
+| `hole_rx_nm` | Hole radius (x) | 50–100 |
+| `hole_ry_nm` | Hole radius (y) | 80–150 |
+| `material` | Waveguide material | Si3N4, Si, Diamond, GaAs |
 
 ### Cavity Taper
 | Parameter | Description | Typical Values |
 |-----------|-------------|----------------|
-| `num_taper_holes` | Chirped holes per side | 5-15 |
-| `num_mirror_holes` | Mirror holes per side | 8-15 |
-| `min_a_percent` | Min period at center (%) | 85-95 |
-| `taper_type` | Chirp profile | quadratic, linear, cubic |
+| `num_taper_holes` | Chirped holes per side | 5–15 |
+| `num_mirror_holes` | Mirror holes per side | 5–10 |
+| `min_a_percent` | Min period at center (%) | 87–90 |
+| `taper_type` | Chirp profile | quadratic (fixed) |
 
 ## Performance Targets
 
-| Metric | Good | Excellent |
-|--------|------|-----------|
-| Q-factor | > 10,000 | > 1,000,000 |
-| Mode volume V | < 1.0 (λ/n)³ | < 0.5 (λ/n)³ |
-| Q/V | > 50,000 | > 100,000 |
+| Metric | Target | Priority |
+|--------|--------|----------|
+| Resonance | Within ±5nm of target | Highest |
+| Q-factor | > 1,000,000 | Second |
+| Mode volume V | < 0.5 (λ/n)³ | Third |
 
 ## How It Works
 
-1. **Unit Cell Setup**: Agent configures the photonic crystal unit cell (period, hole size, waveguide dimensions)
+1. **Unit Cell Setup**: Configure the photonic crystal unit cell (period, hole size, waveguide dimensions, material). The agent confirms all parameters before the first FDTD run.
 
 2. **Cavity Design**: For each iteration:
    - Generates GDS layout with specified taper/mirror parameters
    - Runs Lumerical FDTD simulation
    - Extracts Q-factor from resonance peak
    - Computes mode volume normalized to (λ/n)³
+   - Checks for duplicates to avoid re-running identical simulations
 
-3. **Optimization**: Agent uses design history to:
-   - Adjust taper hole count to balance Q and V
-   - Tune period if resonance drifts from target
-   - Modify `min_a_percent` to adjust confinement
+3. **Optimization**: The agent uses design history to systematically sweep parameters following the strict protocol in `skills.md`. An enforce guard ensures only the currently swept parameter changes between iterations.
+
+4. **Persistence**: All results are saved to `cavity_design_log.json`. When resuming with the same unit cell configuration, previous iterations are automatically loaded.
 
 ## License
 
