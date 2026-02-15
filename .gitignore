@@ -16,3 +16,5 @@ gds_output
 fdtd_output
 .cursor
 cavity_design_log.json
+uv.toml
+best result/

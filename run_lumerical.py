@@ -42,7 +42,11 @@ def run_fdtd_simulation(config, mesh_accuracy=8, run=True):
     gds_file = lum_config["gds_file"]
     cell_name = lum_config["cell_name"]
     layer = lum_config["layer"]
-    material = lum_config["material"]
+    material_refractive_index = lum_config.get("refractive_index")
+    if material_refractive_index is None or float(material_refractive_index) <= 0:
+        return {
+            "error": "Missing/invalid core refractive index. Set lumerical.refractive_index to a positive value."
+        }
 
     # Extract wavelength from config (set by agent from user input)
     wavelength_config = config.get("wavelength", {})
@@ -61,6 +65,7 @@ def run_fdtd_simulation(config, mesh_accuracy=8, run=True):
     substrate_config = config.get("substrate", {})
     freestanding = substrate_config.get("freestanding", True)
     substrate_material = substrate_config.get("material_lumerical", None)
+    substrate_refractive_index = substrate_config.get("refractive_index")
 
     # Extract geometry for simulation region
     geometry = config["geometry"]
@@ -87,14 +92,39 @@ def run_fdtd_simulation(config, mesh_accuracy=8, run=True):
     # Waveguide thickness in meters
     thickness = wg_height * 1e-6
 
+    def _set_object_refractive_index(fdtd_obj, n_value):
+        """Set object refractive index across Lumerical property variants."""
+        last_error = None
+        for prop in ("refractive index", "index"):
+            try:
+                fdtd_obj.set(prop, float(n_value))
+                return
+            except Exception as exc:
+                last_error = exc
+        raise RuntimeError(
+            "Could not set refractive index on object. "
+            "Tried properties: 'refractive index', 'index'. "
+            f"Last error: {last_error}"
+        )
+
     # Import GDS (cavity structure)
     # gdsimport(filename, cellname, layer, material, z_min, z_max)
     fdtd.gdsimport(
-        gds_file, cell_name, layer[0], material, -thickness / 2, thickness / 2
+        gds_file,
+        cell_name,
+        layer[0],
+        "<Object defined dielectric>",
+        -thickness / 2,
+        thickness / 2,
     )
+    _set_object_refractive_index(fdtd, material_refractive_index)
 
     # Create substrate if NOT freestanding
     if not freestanding and substrate_material:
+        if substrate_refractive_index is None or float(substrate_refractive_index) <= 0:
+            return {
+                "error": "Missing/invalid substrate refractive index. Set substrate.refractive_index to a positive value."
+            }
         substrate_thickness = 2e-6  # 2um substrate thickness
         fdtd.addrect()
         fdtd.set("name", "substrate")
@@ -104,8 +134,11 @@ def run_fdtd_simulation(config, mesh_accuracy=8, run=True):
         fdtd.set("y span", (wg_width * 6) * 1e-6)  # wider than waveguide
         fdtd.set("z min", -thickness / 2 - substrate_thickness)  # below waveguide
         fdtd.set("z max", -thickness / 2)  # top at waveguide bottom
-        fdtd.set("material", substrate_material)
-        print(f"Added substrate: {substrate_material}")
+        fdtd.set("material", "<Object defined dielectric>")
+        _set_object_refractive_index(fdtd, substrate_refractive_index)
+        print(
+            f"Added substrate: {substrate_material} (n={float(substrate_refractive_index):.4f})"
+        )
 
     # FDTD simulation region
     fdtd.addfdtd()
@@ -219,8 +252,8 @@ def run_fdtd_simulation(config, mesh_accuracy=8, run=True):
         print("Running simulation...")
         fdtd.run()
 
-        # Refractive index of SiN at ~737nm
-        n_sin = 2.0
+        # Use user-provided core refractive index for (lambda/n)^3 normalization
+        n_core = float(material_refractive_index) 
 
         # Extract Q at the highest peak in spectrum
         q_value = None
@@ -298,7 +331,7 @@ def run_fdtd_simulation(config, mesh_accuracy=8, run=True):
                 lambda_norm = (
                     resonance_wavelength if resonance_wavelength else design_wavelength
                 )
-                lambda_over_n = lambda_norm / n_sin
+                lambda_over_n = lambda_norm / n_core
                 v_normalized = v_raw / (lambda_over_n**3)
                 v_value = v_normalized
 

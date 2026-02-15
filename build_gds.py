@@ -12,9 +12,6 @@ GDS_OUTPUT_FOLDER = "gds_output"
 # GDS cell name
 CELL_NAME = "cavity_design"
 
-# Material for Lumerical
-MATERIAL = "Si3N4 (Silicon Nitride) - Phillip"
-
 
 def normalize_percent(value, threshold=1.5):
     """
@@ -275,12 +272,11 @@ class build_cavity_gds:
                     )
                 ),
             },
-            # For run_lumerical
+            # For run_lumerical (material set by swe_agent)
             "lumerical": {
                 "gds_file": self.gds_filepath,
                 "cell_name": self.cell_name,
                 "layer": self.layer,
-                "material": MATERIAL,
             },
         }
         return config
