@@ -9,9 +9,11 @@ dependencies = [
     "gdsfactory>=9.32.0",
     "gdsfactory-install>=0.0.5",
     "gdspy>=1.6.13",
-    "jupyter>=1.1.1",
     "numpy>=2.4.1",
-    "polars>=1.38.1",
     "python-dotenv>=1.2.1",
-    "seaborn>=0.13.2",
+    "typer>=0.15.0",
+    "rich>=13.0.0",
 ]
+
+[project.scripts]
+cavity = "app.cli:app"

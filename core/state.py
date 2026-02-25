@@ -2,6 +2,8 @@ import os
 import json
 from datetime import datetime
 
+LOG_FILE = "cavity_design_log.json"
+
 
 def _generate_config_key(unit_cell):
     """Generate a unique key from unit_cell parameters for log matching"""
