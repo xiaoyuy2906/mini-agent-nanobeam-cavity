@@ -1,21 +1,11 @@
 import os
 import sys
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
 import asyncio
 from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
-
-# Lumerical API path
-LUMPAPI_PATH = os.getenv("LUMPAPI_PATH")
-if not LUMPAPI_PATH:
-    raise ValueError("LUMPAPI_PATH not set in .env")
-
-sys.path.append(LUMPAPI_PATH)
-import lumapi
 
 # Output folder for FDTD files
 FDTD_OUTPUT_FOLDER = "fdtd_output"
@@ -38,6 +28,20 @@ def sync_run_fdtd_simulation(config, mesh_accuracy=8, run=True):
     Returns:
         dict with simulation results
     """
+    # Lazy import: only load lumapi when this function is actually called
+    LUMPAPI_PATH = os.getenv("LUMPAPI_PATH")
+    if not LUMPAPI_PATH:
+        return {
+            "error": "LUMPAPI_PATH not set in .env — Lumerical is not available on this machine."
+        }
+    sys.path.append(LUMPAPI_PATH)
+    try:
+        import lumapi
+    except ImportError:
+        return {
+            "error": f"Could not import lumapi from {LUMPAPI_PATH}. Check that Lumerical is installed."
+        }
+
     # Extract lumerical config
     lum_config = config["lumerical"]
     gds_file = lum_config["gds_file"]
@@ -360,7 +364,7 @@ async def run_fdtd_simulation(config, mesh_accuracy=8, run=True):
 
 if __name__ == "__main__":
     # Example: run with build_gds config
-    from build_gds import build_cavity_gds
+    from tools.build_gds import build_cavity_gds
 
     # Build cavity and get config (GDS is 2D, no wg_height)
     cavity = build_cavity_gds(

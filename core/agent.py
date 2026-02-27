@@ -1,5 +1,21 @@
+import os
+import json
+import time
+import asyncio
+
 from core.state import CavityDesignState
 from tools.toolset import Toolset
+
+SWEEP_ORDER = [
+    "sweep_min_a",
+    "sweep_rx",
+    "re_sweep_min_a_1",
+    "sweep_ry",
+    "re_sweep_min_a_2",
+    "sweep_taper",
+    "fine_period",
+    "complete",
+]
 
 
 class CavityAgent:
@@ -8,6 +24,135 @@ class CavityAgent:
     def __init__(self, toolset: Toolset, state: CavityDesignState | None = None):
         self.toolset = toolset
         self.state = state or CavityDesignState()
+        self.model_provider = os.getenv("MODEL_PROVIDER", "claude")
+        self.conversation_history = []
+        self.system_prompt = self._build_system_prompt()
+        self.tools = self._define_tools()
+
+    def _build_system_prompt(self) -> str:
+        """Load skills.md if available, fall back to base prompt."""
+        try:
+            with open("./skills.md", "r", encoding="utf-8") as f:
+                skills_text = f.read().strip()
+        except OSError:
+            skills_text = ""
+
+        override_rule = (
+            "## CRITICAL: USER INPUT OVERRIDES EVERYTHING\n"
+            "If the user gives explicit instructions, YOU MUST FOLLOW THEM EXACTLY.\n"
+            "NEVER invent missing unit-cell geometry. If a required value is missing, ask the user.\n"
+            "Before the FIRST FDTD run, show all unit-cell inputs and ask user confirmation.\n"
+            "Only proceed after user says 'confirm fdtd'.\n\n"
+        )
+
+        base_prompt = (
+            "You are an expert nanobeam photonic crystal cavity designer.\n\n"
+            "## Workflow\n"
+            "Each turn: THOUGHT → ACTION (one tool) → OBSERVATION\n\n"
+            "## Goal\n"
+            "Maximize Q/V. Q > 1,000,000 and V < 0.5 (λ/n)³ is excellent.\n\n"
+            "## Tools\n"
+            "- set_unit_cell: configure geometry (call first)\n"
+            "- design_cavity: build GDS + run FDTD\n"
+            "- view_history: inspect previous designs\n"
+            "- compare_designs: compare specific iterations\n"
+            "- get_best_design: retrieve current best\n"
+        )
+
+        if skills_text:
+            return override_rule + skills_text
+        return override_rule + base_prompt
+
+    def _define_tools(self) -> list:
+        """Return the 5 tool schemas passed to every LLM call."""
+        return [
+            {
+                "name": "set_unit_cell",
+                "description": "Set the unit cell parameters. MUST be called first before designing.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "design_wavelength_nm": {"type": "number"},
+                        "wavelength_span_nm": {"type": "number"},
+                        "period_nm": {"type": "number"},
+                        "wg_width_nm": {"type": "number"},
+                        "wg_height_nm": {"type": "number"},
+                        "hole_rx_nm": {"type": "number"},
+                        "hole_ry_nm": {"type": "number"},
+                        "initial_min_a_percent": {"type": "number"},
+                        "wg_material": {"type": "string"},
+                        "wg_material_refractive_index": {"type": "number"},
+                        "freestanding": {"type": "boolean"},
+                        "substrate": {"type": "string"},
+                        "substrate_material_refractive_index": {"type": "number"},
+                    },
+                    "required": [
+                        "design_wavelength_nm",
+                        "period_nm",
+                        "wg_width_nm",
+                        "wg_height_nm",
+                        "hole_rx_nm",
+                        "hole_ry_nm",
+                        "wg_material",
+                        "wg_material_refractive_index",
+                        "freestanding",
+                    ],
+                },
+            },
+            {
+                "name": "design_cavity",
+                "description": "Design a cavity and run Lumerical FDTD for Q/V performance.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "period_nm": {"type": "number"},
+                        "wg_width_nm": {"type": "number"},
+                        "hole_rx_nm": {"type": "number"},
+                        "hole_ry_nm": {"type": "number"},
+                        "num_taper_holes": {"type": "integer"},
+                        "num_mirror_holes": {"type": "integer"},
+                        "min_a_percent": {"type": "number"},
+                        "min_rx_percent": {"type": "number"},
+                        "min_ry_percent": {"type": "number"},
+                        "hypothesis": {"type": "string"},
+                    },
+                    "required": [
+                        "num_taper_holes",
+                        "num_mirror_holes",
+                        "min_a_percent",
+                    ],
+                },
+            },
+            {
+                "name": "view_history",
+                "description": "View the history of all designs tried so far.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "last_n": {"type": "integer"},
+                    },
+                },
+            },
+            {
+                "name": "compare_designs",
+                "description": "Compare two or more designs side by side.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "iterations": {
+                            "type": "array",
+                            "items": {"type": "integer"},
+                        }
+                    },
+                    "required": ["iterations"],
+                },
+            },
+            {
+                "name": "get_best_design",
+                "description": "Get the current best design with highest Q/V.",
+                "input_schema": {"type": "object", "properties": {}},
+            },
+        ]
 
     def set_unit_cell(self, unit_cell: dict) -> dict:
         if not isinstance(unit_cell, dict) or not unit_cell:
