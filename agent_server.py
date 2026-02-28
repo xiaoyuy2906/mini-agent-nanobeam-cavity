@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-agent_server.py — stdin/stdout JSON bridge using claude_agent_sdk.
+agent_server.py — stdin/stdout JSON bridge using direct Anthropic SDK.
 
 Protocol:
   STDIN  (from JS): {"type": "user_message", "content": "..."}
@@ -13,134 +13,103 @@ import json
 import asyncio
 import os
 from dotenv import load_dotenv
+from anthropic import AsyncAnthropic
 
 load_dotenv()
 
-from claude_agent_sdk import (
-    query,
-    ClaudeAgentOptions,
-    CLINotFoundError,
-    AssistantMessage,
-    UserMessage,
-    ResultMessage,
-    SystemMessage,
-    TextBlock,
-    ToolUseBlock,
-)
 from core.agent import CavityAgent
 from core.state import CavityDesignState
 from tools.toolset import Toolset
-from tools.cavity_mcp import create_cavity_mcp_server
 
 
 def emit(event: dict) -> None:
     print(json.dumps(event, default=str), flush=True)
 
 
-def build_agent_and_server():
+async def dispatch_tool(agent: CavityAgent, name: str, args: dict) -> dict:
+    if name == "set_unit_cell":
+        return agent.set_unit_cell_from_tool_params(args)
+    if name == "design_cavity":
+        return await agent.design_cavity(args, run=True)
+    if name == "view_history":
+        return agent.view_history(last_n=args.get("last_n"))
+    if name == "compare_designs":
+        return agent.compare_designs(iterations=args.get("iterations", []))
+    if name == "get_best_design":
+        return agent.get_best_design()
+    return {"ok": False, "error": f"Unknown tool: {name}"}
+
+
+async def run_agent_loop(
+    content: str,
+    agent: CavityAgent,
+    client: AsyncAnthropic,
+    model: str,
+    conversation_history: list,
+) -> None:
+    conversation_history.append({"role": "user", "content": content})
+
+    while True:
+        response = await client.messages.create(
+            model=model,
+            max_tokens=4096,
+            system=agent.system_prompt,
+            tools=agent.tools,
+            messages=conversation_history,
+        )
+
+        conversation_history.append({"role": "assistant", "content": response.content})
+
+        for block in response.content:
+            if block.type == "text" and block.text:
+                emit({"type": "text", "delta": block.text})
+
+        if response.stop_reason != "tool_use":
+            break
+
+        tool_results = []
+        for block in response.content:
+            if block.type != "tool_use":
+                continue
+
+            emit({"type": "tool_start", "name": block.name, "input": block.input})
+
+            try:
+                result = await dispatch_tool(agent, block.name, block.input)
+            except Exception as e:
+                result = {"ok": False, "error": str(e)}
+
+            emit({"type": "tool_end", "name": block.name, "result": result})
+
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": block.id,
+                "content": json.dumps(result, default=str),
+            })
+
+        conversation_history.append({"role": "user", "content": tool_results})
+
+    emit({"type": "done"})
+
+
+async def main():
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         emit({"type": "error", "message": "ANTHROPIC_API_KEY not set in .env"})
         sys.exit(1)
 
-    toolset = Toolset()
-    agent = CavityAgent(toolset=toolset, state=CavityDesignState())
-    mcp_server = create_cavity_mcp_server(agent)
-    return mcp_server, agent.system_prompt
-
-
-async def handle_message(
-    content: str,
-    mcp_server,
-    system_prompt: str,
-    session_id: str | None,
-) -> str | None:
-    """Run one user turn via claude_agent_sdk, emit events, return new session_id."""
-    options = ClaudeAgentOptions(
-        mcp_servers={"cavity": mcp_server},
-        system_prompt=system_prompt,
-        permission_mode="bypassPermissions",
+    model = os.getenv("MODEL_NAME", "claude-sonnet-4-6")
+    base_url = os.getenv("ANTHROPIC_BASE_URL")
+    client = (
+        AsyncAnthropic(api_key=api_key, base_url=base_url)
+        if base_url
+        else AsyncAnthropic(api_key=api_key)
     )
-    if session_id:
-        options.resume = session_id
 
-    tool_id_to_name: dict[str, str] = {}
-    new_session_id = session_id
+    agent = CavityAgent(toolset=Toolset(), state=CavityDesignState())
+    conversation_history: list = []
 
-    try:
-        async for event in query(prompt=content, options=options):
-            if isinstance(event, ResultMessage):
-                if event.session_id:
-                    new_session_id = event.session_id
-                if event.is_error and event.result:
-                    emit({"type": "error", "message": event.result})
-                continue
-
-            if isinstance(event, SystemMessage):
-                continue
-
-            if isinstance(event, AssistantMessage):
-                for block in event.content:
-                    if isinstance(block, TextBlock) and block.text:
-                        emit({"type": "text", "delta": block.text})
-                    elif isinstance(block, ToolUseBlock):
-                        tool_id_to_name[block.id] = block.name
-                        emit({"type": "tool_start", "name": block.name, "input": block.input or {}})
-                continue
-
-            if isinstance(event, UserMessage) and event.parent_tool_use_id is not None:
-                name = tool_id_to_name.get(event.parent_tool_use_id, "unknown")
-                result = _parse_tool_result(event.content)
-                emit({"type": "tool_end", "name": name, "result": result})
-                continue
-
-    except CLINotFoundError:
-        emit({"type": "error", "message": "Claude Code CLI not found. Install: npm install -g @anthropic-ai/claude-code"})
-    except Exception as e:
-        # Unwrap ExceptionGroup (raised by asyncio.TaskGroup inside the SDK)
-        # to surface the real underlying error message
-        if isinstance(e, ExceptionGroup):
-            msg = "; ".join(f"{type(sub).__name__}: {sub}" for sub in e.exceptions)
-        else:
-            msg = f"{type(e).__name__}: {e}"
-        emit({"type": "error", "message": msg})
-
-    emit({"type": "done"})
-    return new_session_id
-
-
-def _parse_tool_result(content) -> dict:
-    """Extract a dict from MCP tool result content (string or list of blocks)."""
-    if content is None:
-        return {}
-    if isinstance(content, str):
-        try:
-            return json.loads(content)
-        except json.JSONDecodeError:
-            return {"text": content}
-    if isinstance(content, list):
-        texts = [
-            (b.get("text") if isinstance(b, dict) else getattr(b, "text", None))
-            for b in content
-        ]
-        combined = "\n".join(t for t in texts if t)
-        try:
-            return json.loads(combined)
-        except json.JSONDecodeError:
-            return {"text": combined}
-    return {}
-
-
-async def main():
-    # claude_agent_sdk spawns Claude Code CLI as a subprocess. If agent_server.py
-    # is itself launched from inside a Claude Code session, the CLI refuses to start
-    # ("nested session" error). Unsetting CLAUDECODE lets the subprocess launch cleanly.
-    os.environ.pop("CLAUDECODE", None)
-
-    mcp_server, system_prompt = build_agent_and_server()
     emit({"type": "ready"})
-
-    session_id: str | None = None
 
     for raw_line in sys.stdin:
         raw_line = raw_line.strip()
@@ -158,7 +127,11 @@ async def main():
         if not content:
             continue
 
-        session_id = await handle_message(content, mcp_server, system_prompt, session_id)
+        try:
+            await run_agent_loop(content, agent, client, model, conversation_history)
+        except Exception as e:
+            emit({"type": "error", "message": str(e)})
+            emit({"type": "done"})
 
 
 if __name__ == "__main__":
