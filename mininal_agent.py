@@ -42,15 +42,15 @@ class CavityAgent:
             "\n"
             "WORKFLOW:\n"
             "1. FIRST: Get unit cell and DESIGN WAVELENGTH from user:\n"
-            "   - design_wavelength_nm: CRITICAL! The target resonance wavelength in nm\n"
+            "   - design_wavelength_nm: CRITICAL! The target wavelength (e.g., 737 for SiV, 637 for NV)\n"
             "   - wavelength_span_nm: simulation range (default ±100nm)\n"
             "   - period (nm), wg_width (nm), wg_height (nm)\n"
             "   - hole_rx (nm), hole_ry (nm) - elliptical holes (rx=ry for round)\n"
             "   - material (SiN, Si, Diamond, GaAs)\n"
             "   - freestanding or on substrate?\n"
             "   Common platforms:\n"
-            "   - SiN freestanding\n"
-            "   - Diamond freestanding\n"
+            "   - SiN freestanding for SiV (737nm)\n"
+            "   - Diamond freestanding for NV (637nm)\n"
             "   - GaAs on Diamond\n"
             "   If not freestanding, ask about substrate material.\n"
             "   Call set_unit_cell tool.\n"
@@ -74,10 +74,9 @@ class CavityAgent:
             "\n"
             "OPTIMIZATION STRATEGY (if Q/V is not ideal):\n"
             "1. Increase num_taper_holes (e.g., 10, 12, 15...)\n"
-            "2. Increase num_mirror_holes (e.g., 12, 14, 16...)\n"
-            "3. Only then adjust min_a_percent (e.g., 85, 80, 75...)\n"
-            "4. Only add hole chirp (min_hole_percent < 100) as a last resort\n"
-            "5. These are starting points, not limits. Explore freely.\n"
+            "2. Decrease min_a_percent (e.g., 85, 80, 75...)\n"
+            "3. Only add hole chirp (min_hole_percent < 100) as a last resort\n"
+            "4. These are starting points, not limits. Explore freely.\n"
         )
 
         self.tools = [
@@ -89,7 +88,7 @@ class CavityAgent:
                     "properties": {
                         "design_wavelength_nm": {
                             "type": "number",
-                            "description": "Target resonance wavelength in nanometers",
+                            "description": "Target design wavelength in nanometers (e.g., 737 for SiV, 637 for NV center)",
                         },
                         "wavelength_span_nm": {
                             "type": "number",
@@ -305,7 +304,15 @@ class CavityAgent:
 
     def _design_and_simulate(self, params):
         # Get params from LLM
-        num_taper_holes = params.get("num_taper_holes", 6)
+        ncav = params.get("ncav")
+        num_taper_holes = params.get("num_taper_holes")
+        if ncav is None and num_taper_holes is None:
+            return {"error": "Missing required parameter: ncav"}
+        if ncav is None:
+            ncav = int(num_taper_holes) * 2
+        if ncav % 2 != 0 or ncav <= 0:
+            return {"error": "ncav must be a positive even integer (total cavity holes)"}
+        num_taper_holes = int(ncav / 2)
         num_mirror_holes = params.get("num_mirror_holes", 10)
         taper_type = params.get("taper_type", "quadratic")
         min_a_percent = params.get("min_a_percent", 80)
@@ -320,7 +327,7 @@ class CavityAgent:
 
         # Step 1: Build cavity GDS
         print(
-            f"Building cavity: taper={num_taper_holes}, mirror={num_mirror_holes}, type={taper_type}, min_a={min_a_percent}%, min_hole={min_hole_percent}%"
+            f"Building cavity: Ncav={ncav}, mirror={num_mirror_holes}, type={taper_type}, min_a={min_a_percent}%, min_hole={min_hole_percent}%"
         )
         cavity = build_cavity_gds(
             period=period,
@@ -358,7 +365,7 @@ class CavityAgent:
         # Step 2: Run FDTD simulation
         print(f"Setting up FDTD simulation...")
         try:
-            result = run_fdtd_simulation(config, mesh_accuracy=8, run=run_simulation)
+            result = run_fdtd_simulation(config, mesh_accuracy=4, run=run_simulation)
             config["simulation"] = result
         except Exception as e:
             config["simulation"] = {"status": "error", "message": str(e)}

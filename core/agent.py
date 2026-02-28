@@ -154,6 +154,13 @@ class CavityAgent:
             },
         ]
 
+    SUBSTRATE_LUMERICAL = {
+        "SiO2": "SiO2 (Glass) - Palik",
+        "Si": "Si (Silicon) - Palik",
+        "Diamond": "Diamond - Palik",
+        "none": None,
+    }
+
     def set_unit_cell(self, unit_cell: dict) -> dict:
         if not isinstance(unit_cell, dict) or not unit_cell:
             return {"ok": False, "error": "unit_cell must be a non-empty dict"}
@@ -161,12 +168,79 @@ class CavityAgent:
         self.state.unit_cell = unit_cell
         return {"ok": True, "message": "Unit cell configured"}
 
+    def set_unit_cell_from_tool_params(self, params: dict) -> dict:
+        """Convert flat tool params to unit_cell and call set_unit_cell."""
+        required = [
+            "design_wavelength_nm", "period_nm", "wg_width_nm", "wg_height_nm",
+            "hole_rx_nm", "hole_ry_nm", "wg_material", "wg_material_refractive_index",
+        ]
+        missing = [f for f in required if f not in params or params[f] is None]
+        if missing:
+            return {"ok": False, "error": f"Missing required: {', '.join(missing)}"}
+
+        freestanding = params.get("freestanding", True)
+        substrate = params.get("substrate", "none")
+        if freestanding:
+            substrate = "none"
+
+        nm_to_um = 1e-3  # 200 nm = 0.2 um
+        unit_cell = {
+            "design_wavelength": float(params["design_wavelength_nm"]) * 1e-9,  # nm -> m
+            "wavelength_span": float(params.get("wavelength_span_nm", 100)) * 1e-9,
+            "period": float(params["period_nm"]) * nm_to_um,
+            "wg_width": float(params["wg_width_nm"]) * nm_to_um,
+            "wg_height": float(params["wg_height_nm"]) * nm_to_um,
+            "hole_rx": float(params["hole_rx_nm"]) * nm_to_um,
+            "hole_ry": float(params["hole_ry_nm"]) * nm_to_um,
+            "material": str(params["wg_material"]),
+            "material_refractive_index": float(params["wg_material_refractive_index"]),
+            "freestanding": freestanding,
+            "substrate": substrate,
+            "substrate_lumerical": self.SUBSTRATE_LUMERICAL.get(substrate),
+            "substrate_refractive_index": params.get("substrate_material_refractive_index"),
+        }
+        return self.set_unit_cell(unit_cell)
+
+    def _design_params_to_build_gds_kwargs(self, params: dict) -> dict:
+        """Merge unit_cell with design params and convert to build_gds kwargs (microns)."""
+        uc = self.state.unit_cell or {}
+        nm_to_um = 1e-3
+
+        def _get(key_nm: str, uc_key: str, default_um: float) -> float:
+            v = params.get(key_nm)
+            if v is not None:
+                return float(v) * nm_to_um
+            u = uc.get(uc_key)
+            if isinstance(u, (int, float)):
+                return float(u)
+            return default_um
+
+        period = _get("period_nm", "period", 0.2)
+        wg_width = _get("wg_width_nm", "wg_width", 0.45)
+        hole_rx = _get("hole_rx_nm", "hole_rx", 0.05)
+        hole_ry = _get("hole_ry_nm", "hole_ry", 0.1)
+
+        return {
+            "period": period,
+            "hole_rx": hole_rx,
+            "hole_ry": hole_ry,
+            "wg_width": wg_width,
+            "num_taper_holes": int(params.get("num_taper_holes", 8)),
+            "num_mirror_holes": int(params.get("num_mirror_holes", 10)),
+            "min_a_percent": float(params.get("min_a_percent", 90)),
+            "min_rx_percent": float(params.get("min_rx_percent", 100)),
+            "min_ry_percent": float(params.get("min_ry_percent", 100)),
+            "taper_type": str(params.get("taper_type", "quadratic")),
+        }
+
     async def design_cavity(self, design_params: dict, run: bool = True) -> dict:
         if self.state.unit_cell is None:
             return {"ok": False, "error": "Call set_unit_cell first"}
 
+        kwargs = self._design_params_to_build_gds_kwargs(design_params)
+
         # 1) Build GDS
-        gds_ret = self.toolset.build_gds(**design_params)
+        gds_ret = self.toolset.build_gds(**kwargs)
         if not gds_ret["ok"]:
             return gds_ret
 
@@ -204,8 +278,9 @@ class CavityAgent:
 
         sim_result = sim_ret["data"]
 
-        # 4) Update state
-        self.state.add_design(design_params, sim_result)
+        # 4) Update state (store params for display)
+        log_params = {**design_params, "period": kwargs.get("period"), "wg_width": kwargs.get("wg_width")}
+        self.state.add_design(log_params, sim_result)
         self.state.save_log()
 
         return {
@@ -219,6 +294,26 @@ class CavityAgent:
         if self.state.best_design is None:
             return {"ok": False, "message": "No design yet"}
         return {"ok": True, "best_design": self.state.best_design}
+
+    def view_history(self, last_n: int | None = None) -> dict:
+        history = self.state.design_history
+        if not history:
+            return {"ok": True, "message": "No designs yet", "history": []}
+        if last_n:
+            history = history[-last_n:]
+        return {"ok": True, "history": history, "total": len(self.state.design_history)}
+
+    def compare_designs(self, iterations: list[int]) -> dict:
+        designs = []
+        for i in iterations:
+            entry = next(
+                (d for d in self.state.design_history if d["iteration"] == i), None
+            )
+            if entry:
+                designs.append(entry)
+            else:
+                designs.append({"iteration": i, "error": "Not found"})
+        return {"ok": True, "designs": designs}
 
     def get_summary(self) -> dict:
         return {"ok": True, "summary": self.state.get_summary()}

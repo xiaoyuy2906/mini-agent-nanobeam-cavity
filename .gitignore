@@ -18,3 +18,13 @@ fdtd_output
 cavity_design_log.json
 uv.toml
 best result/
+
+# IDE / tool configs
+.windsurf/
+.cursor
+
+# Claude Code / agent tool internals
+.agent/
+.agents/
+skills/
+skills-lock.json
