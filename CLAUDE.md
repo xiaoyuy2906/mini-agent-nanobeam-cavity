@@ -5,50 +5,58 @@
 AI-driven nanobeam photonic crystal cavity design tool. Core goal: maximize Q/V (quality factor / mode volume).
 
 - **Language**: Python 3.13
-- **Package manager**: uv (`uv run` to execute, always confirm `pyproject.toml` exists before `uv add`)
-- **CLI entry**: `uv run cavity` (powered by Typer)
-- **LLM**: Anthropic Claude (via `anthropic` SDK)
+- **Package manager**: uv (`uv add <package>`, pyproject.toml already exists)
+- **LLM**: Anthropic Claude (via `anthropic` SDK — `AsyncAnthropic`)
+- **Frontend**: Node.js terminal chat (`chat.js`)
 
 ## Project Structure
 
 ```
-app/          # CLI and interactive chat interface
-  cli.py      # Typer CLI entry point (cavity command)
-  chat.py     # Interactive chat loop
-core/         # Core agent logic
-  agent.py    # CavityAgent class (state + tools + workflow)
-  state.py    # CavityDesignState (design history, best design)
-tools/        # Low-level tools
-  build_gds.py       # gdsfactory GDS layout generation
-  run_lumerical.py   # Lumerical FDTD simulation
-  toolset.py         # Toolset wrapper
-  cavity_mcp.py      # MCP server (experimental)
-skills.md     # Agent system prompt / skill overrides
-mininal_agent.py  # Early simple agent (reference only)
+agent_server.py   # stdin/stdout JSON bridge — Anthropic tool-use loop
+chat.js           # Node.js terminal UI (spawns agent_server.py)
+skills.md         # Agent system prompt
+core/
+  agent.py        # CavityAgent — system prompt, tool schemas, tool methods
+  state.py        # CavityDesignState — design history, best design, log persistence
+tools/
+  toolset.py      # Thin wrappers: build_gds + run_simulation
+  build_gds.py    # gdsfactory GDS layout generation
+  run_lumerical.py # Lumerical FDTD simulation (Q/V extraction)
 ```
 
-## Environment Variables (required)
+## Environment Variables
 
 Must be set in `.env`:
 
 ```
 ANTHROPIC_API_KEY=sk-ant-...
-LUMPAPI_PATH=/path/to/lumerical/api
+LUMPAPI_PATH=/path/to/lumerical/api   # optional — skips FDTD if not set
+MODEL_NAME=claude-sonnet-4-6           # optional — default: claude-sonnet-4-6
+ANTHROPIC_BASE_URL=...                 # optional — for custom endpoints
 ```
 
-## Common Commands
+## Running
 
 ```bash
-uv run cavity chat          # Start interactive design chat
-uv run cavity sweep         # Run full parameter sweep workflow
-uv run python mininal_agent.py  # Run the early simple agent
+node chat.js                          # Start interactive design chat
+uv run python agent_server.py         # Python server only (pipe JSON manually)
 ```
 
-## Sweep Workflow Order
+## Architecture
 
 ```
-sweep_min_a → sweep_rx → re_sweep_min_a_1 → sweep_ry →
-re_sweep_min_a_2 → sweep_taper → fine_period → complete
+node chat.js
+  │  spawn("uv run python agent_server.py")
+  │  stdin  → {"type": "user_message", "content": "..."}
+  │  stdout ← {"type": "text"|"tool_start"|"tool_end"|"done"|"error"}
+  ▼
+agent_server.py  (AsyncAnthropic tool-use loop)
+  ├── client.messages.create(tools=agent.tools, ...)
+  └── dispatch_tool() → CavityAgent methods directly
+         ▼
+  core/agent.py  CavityAgent
+  ├── tools/build_gds.py
+  └── tools/run_lumerical.py
 ```
 
 ## Agent Tools
@@ -61,6 +69,13 @@ re_sweep_min_a_2 → sweep_taper → fine_period → complete
 | `compare_designs` | Compare specific design iterations |
 | `get_best_design` | Retrieve current best design |
 
+## Sweep Workflow Order
+
+```
+sweep_min_a → sweep_rx → re_sweep_min_a_1 → sweep_ry →
+re_sweep_min_a_2 → sweep_taper → fine_period → complete
+```
+
 ## Physics Reference
 
 - Supported materials: SiN, Si, Diamond, GaAs — freestanding or on substrate
@@ -69,8 +84,6 @@ re_sweep_min_a_2 → sweep_taper → fine_period → complete
 
 ## Development Rules
 
-- **Dependencies**: Run `uv init` first if `pyproject.toml` does not exist, then `uv add <package>`
-- **File navigation**: Always `ls` to confirm a directory exists before navigating — never guess paths
-- **Tool commands**: Before running any setup command, list all prerequisite steps and verify each one
+- **File navigation**: Always `ls` before navigating — never guess paths
 - **Bug fixes**: Briefly explain why the fix works
 - **Units**: Code mixes nm / μm / m — double-check unit conversions carefully

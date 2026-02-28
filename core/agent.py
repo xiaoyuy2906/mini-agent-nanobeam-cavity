@@ -1,7 +1,5 @@
 import os
-import json
-import time
-import asyncio
+from pathlib import Path
 
 from core.state import CavityDesignState
 from tools.toolset import Toolset
@@ -32,7 +30,8 @@ class CavityAgent:
     def _build_system_prompt(self) -> str:
         """Load skills.md if available, fall back to base prompt."""
         try:
-            with open("./skills.md", "r", encoding="utf-8") as f:
+            skills_path = Path(__file__).parent.parent / "skills.md"
+            with open(skills_path, "r", encoding="utf-8") as f:
                 skills_text = f.read().strip()
         except OSError:
             skills_text = ""
