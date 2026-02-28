@@ -19,6 +19,7 @@ load_dotenv()
 from claude_agent_sdk import (
     query,
     ClaudeAgentOptions,
+    CLINotFoundError,
     AssistantMessage,
     UserMessage,
     ResultMessage,
@@ -59,13 +60,6 @@ async def handle_message(
         mcp_servers={"cavity": mcp_server},
         system_prompt=system_prompt,
         permission_mode="bypassPermissions",
-        allowed_tools=[
-            "set_unit_cell",
-            "design_cavity",
-            "view_history",
-            "compare_designs",
-            "get_best_design",
-        ],
     )
     if session_id:
         options.resume = session_id
@@ -100,8 +94,16 @@ async def handle_message(
                 emit({"type": "tool_end", "name": name, "result": result})
                 continue
 
+    except CLINotFoundError:
+        emit({"type": "error", "message": "Claude Code CLI not found. Install: npm install -g @anthropic-ai/claude-code"})
     except Exception as e:
-        emit({"type": "error", "message": str(e)})
+        # Unwrap ExceptionGroup (raised by asyncio.TaskGroup inside the SDK)
+        # to surface the real underlying error message
+        if isinstance(e, ExceptionGroup):
+            msg = "; ".join(f"{type(sub).__name__}: {sub}" for sub in e.exceptions)
+        else:
+            msg = f"{type(e).__name__}: {e}"
+        emit({"type": "error", "message": msg})
 
     emit({"type": "done"})
     return new_session_id
@@ -130,6 +132,11 @@ def _parse_tool_result(content) -> dict:
 
 
 async def main():
+    # claude_agent_sdk spawns Claude Code CLI as a subprocess. If agent_server.py
+    # is itself launched from inside a Claude Code session, the CLI refuses to start
+    # ("nested session" error). Unsetting CLAUDECODE lets the subprocess launch cleanly.
+    os.environ.pop("CLAUDECODE", None)
+
     mcp_server, system_prompt = build_agent_and_server()
     emit({"type": "ready"})
 
