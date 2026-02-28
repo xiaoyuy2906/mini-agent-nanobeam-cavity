@@ -6,13 +6,13 @@ AI-driven nanobeam photonic crystal cavity design tool. Core goal: maximize Q/V 
 
 - **Language**: Python 3.13
 - **Package manager**: uv (`uv add <package>`, pyproject.toml already exists)
-- **LLM**: Anthropic Claude (via `anthropic` SDK — `AsyncAnthropic`)
+- **LLM**: Anthropic Claude (via `claude-agent-sdk` — `query()` + MCP)
 - **Frontend**: Node.js terminal chat (`chat.js`)
 
 ## Project Structure
 
 ```
-agent_server.py   # stdin/stdout JSON bridge — Anthropic tool-use loop
+agent_server.py   # stdin/stdout JSON bridge — claude_agent_sdk.query() loop
 chat.js           # Node.js terminal UI (spawns agent_server.py)
 skills.md         # Agent system prompt
 core/
@@ -20,6 +20,7 @@ core/
   state.py        # CavityDesignState — design history, best design, log persistence
 tools/
   toolset.py      # Thin wrappers: build_gds + run_simulation
+  cavity_mcp.py   # MCP server exposing CavityAgent tools to claude_agent_sdk
   build_gds.py    # gdsfactory GDS layout generation
   run_lumerical.py # Lumerical FDTD simulation (Q/V extraction)
 ```
@@ -50,9 +51,10 @@ node chat.js
   │  stdin  → {"type": "user_message", "content": "..."}
   │  stdout ← {"type": "text"|"tool_start"|"tool_end"|"done"|"error"}
   ▼
-agent_server.py  (AsyncAnthropic tool-use loop)
-  ├── client.messages.create(tools=agent.tools, ...)
-  └── dispatch_tool() → CavityAgent methods directly
+agent_server.py  (claude_agent_sdk.query())
+  └── ClaudeAgentOptions(mcp_servers={"cavity": mcp_server})
+         ▼
+  tools/cavity_mcp.py  (MCP server)
          ▼
   core/agent.py  CavityAgent
   ├── tools/build_gds.py
