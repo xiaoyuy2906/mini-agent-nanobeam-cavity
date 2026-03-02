@@ -67,26 +67,22 @@ async def run_agent_loop(
         if response.stop_reason != "tool_use":
             break
 
-        tool_results = []
-        for block in response.content:
-            if block.type != "tool_use":
-                continue
+        tool_blocks = [b for b in response.content if b.type == "tool_use"]
 
+        async def _run_one(block):
             emit({"type": "tool_start", "name": block.name, "input": block.input})
-
             try:
                 result = await dispatch_tool(agent, block.name, block.input)
             except Exception as e:
                 result = {"ok": False, "error": str(e)}
-
             emit({"type": "tool_end", "name": block.name, "result": result})
-
-            tool_results.append({
+            return {
                 "type": "tool_result",
                 "tool_use_id": block.id,
                 "content": json.dumps(result, default=str),
-            })
+            }
 
+        tool_results = list(await asyncio.gather(*[_run_one(b) for b in tool_blocks]))
         conversation_history.append({"role": "user", "content": tool_results})
 
     emit({"type": "done"})
