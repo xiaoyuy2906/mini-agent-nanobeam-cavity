@@ -5,7 +5,7 @@ from tools.run_lumerical import run_fdtd_simulation
 class Toolset:
     def build_gds(self, **kwargs) -> dict:
         try:
-            cavity = build_cavity_gds(**kwargs)
+            cavity = build_cavity_gds(**kwargs, save=True)
             return {"ok": True, "data": cavity}
         except Exception as e:
             return {"ok": False, "error": str(e)}

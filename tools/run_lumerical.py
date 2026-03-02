@@ -93,6 +93,7 @@ def sync_run_fdtd_simulation(config, mesh_accuracy=8, run=True):
 
     # Waveguide thickness in meters
     thickness = wg_height * 1e-6
+    log = lambda *a, **kw: print(*a, file=sys.stderr, **kw)
 
     def _set_object_refractive_index(fdtd_obj, n_value):
         """Set object refractive index across Lumerical property variants."""
@@ -143,7 +144,7 @@ def sync_run_fdtd_simulation(config, mesh_accuracy=8, run=True):
             fdtd.set("z max", -thickness / 2)  # top at waveguide bottom
             fdtd.set("material", "<Object defined dielectric>")
             _set_object_refractive_index(fdtd, substrate_refractive_index)
-            print(
+            log(
                 f"Added substrate: {substrate_material} (n={float(substrate_refractive_index):.4f})"
             )
 
@@ -238,7 +239,7 @@ def sync_run_fdtd_simulation(config, mesh_accuracy=8, run=True):
 
         # Save project
         fdtd.save(fdtd_file)
-        print(f"Saved: {fdtd_file}")
+        log(f"Saved: {fdtd_file}")
 
         result = {
             "status": "success",
@@ -248,7 +249,7 @@ def sync_run_fdtd_simulation(config, mesh_accuracy=8, run=True):
 
         # Run simulation if requested
         if run:
-            print("Running simulation...")
+            log("Running simulation...")
             fdtd.run()
 
             # Use user-provided core refractive index for (lambda/n)^3 normalization
@@ -277,10 +278,10 @@ def sync_run_fdtd_simulation(config, mesh_accuracy=8, run=True):
                         peak_wavelength = float(spectrum_lambda[peak_idx])
                         peak_intensity = float(spectrum_array[peak_idx])
 
-                        print(
+                        log(
                             f"Spectrum peak: {peak_wavelength * 1e9:.2f} nm (intensity: {peak_intensity:.2e})"
                         )
-                        print(f"Target wavelength: {design_wavelength * 1e9:.1f} nm")
+                        log(f"Target wavelength: {design_wavelength * 1e9:.1f} nm")
 
                         # Step 2: Find Q at the peak wavelength
                         if (
@@ -297,8 +298,8 @@ def sync_run_fdtd_simulation(config, mesh_accuracy=8, run=True):
                                 q_value = float(q_array[q_idx])
                                 resonance_wavelength = float(q_lambda[q_idx])
 
-                                print(f"Found {len(q_array)} Q values")
-                                print(
+                                log(f"Found {len(q_array)} Q values")
+                                log(
                                     f"Q at peak: {q_value:.0f} at {resonance_wavelength * 1e9:.2f} nm"
                                 )
 
@@ -307,12 +308,12 @@ def sync_run_fdtd_simulation(config, mesh_accuracy=8, run=True):
                                     abs(resonance_wavelength - design_wavelength) * 1e9
                                 )
                                 if deviation_nm > 50:
-                                    print(
+                                    log(
                                         f"WARNING: Resonance is {deviation_nm:.1f} nm from target!"
                                     )
 
             except Exception as e:
-                print(f"Q extraction error: {e}")
+                log(f"Q extraction error: {e}")
                 q_value = None
 
             # Extract mode volume and normalize to (λ/n)³
@@ -334,10 +335,10 @@ def sync_run_fdtd_simulation(config, mesh_accuracy=8, run=True):
                     v_normalized = v_raw / (lambda_over_n**3)
                     v_value = v_normalized
 
-                    print(f"Mode volume (raw): {v_raw:.3e} m**3")
-                    print(f"Mode volume (normalized): {v_normalized:.3f} (lambda/n)³")
+                    log(f"Mode volume (raw): {v_raw:.3e} m**3")
+                    log(f"Mode volume (normalized): {v_normalized:.3f} (lambda/n)³")
             except Exception as e:
-                print(f"Mode volume extraction error: {e}")
+                log(f"Mode volume extraction error: {e}")
                 v_value = None
 
             result["simulation_completed"] = True

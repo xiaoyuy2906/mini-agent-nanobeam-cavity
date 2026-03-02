@@ -100,9 +100,9 @@ function handleEvent(event, rl) {
       const ok = event.result?.ok !== false;
       const symbol = ok ? chalk.green("  ✓") : chalk.red("  ✗");
       const parts = [
-        r.Q ? `Q=${Number(r.Q).toLocaleString()}` : null,
+        r.Q ? `Q=${Number(r.Q).toLocaleString('en-US')}` : null,
         r.V ? `V=${Number(r.V).toFixed(3)}` : null,
-        r.qv_ratio ? `Q/V=${Number(r.qv_ratio).toLocaleString()}` : null,
+        r.qv_ratio ? `Q/V=${Number(r.qv_ratio).toLocaleString('en-US')}` : null,
         !ok && (event.result?.error || event.result?.message)
           ? event.result.error || event.result.message
           : null,

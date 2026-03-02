@@ -1,6 +1,9 @@
 import os
+import sys
 import json
 from datetime import datetime
+
+_log = lambda *a, **kw: print(*a, file=sys.stderr, **kw)
 
 LOG_FILE = "cavity_design_log.json"
 
@@ -130,7 +133,7 @@ class CavityDesignState:
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(all_logs, f, indent=2, default=str)
 
-        print(f"[LOG] Saved {self.iteration} iterations to {filepath}")
+        _log(f"[LOG] Saved {self.iteration} iterations to {filepath}")
 
     def load_log(self, unit_cell, filepath=LOG_FILE):
         """Load previous results if same configuration exists"""
@@ -162,7 +165,7 @@ class CavityDesignState:
         self.step_start_iter = log_data.get("step_start_iter", 0)
         self.locked_params = log_data.get("locked_params", {})
 
-        print(f"[LOG] Loaded {self.iteration} previous iterations from {filepath}")
-        print(f"[LOG] Sweep step: {self.sweep_step}, locked: {self.locked_params}")
-        print(f"[LOG] Best Q/V so far: {self.best_qv_ratio:,.0f}")
+        _log(f"[LOG] Loaded {self.iteration} previous iterations from {filepath}")
+        _log(f"[LOG] Sweep step: {self.sweep_step}, locked: {self.locked_params}")
+        _log(f"[LOG] Best Q/V so far: {self.best_qv_ratio:,.0f}")
         return True
