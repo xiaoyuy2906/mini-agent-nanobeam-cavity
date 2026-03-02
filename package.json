@@ -1,0 +1,28 @@
+{
+  "name": "my-agent",
+  "version": "1.0.0",
+  "description": "An AI agent that designs and optimizes nanobeam photonic crystal cavities using the SWE-agent pattern. The agent systematically explores design parameters through FDTD simulation to maximize Q/V (quality factor over mode volume).",
+  "main": "chat.js",
+  "directories": {
+    "example": "examples"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xiaoyuy2906/mini-agent-nanobeam-cavity.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/xiaoyuy2906/mini-agent-nanobeam-cavity/issues"
+  },
+  "homepage": "https://github.com/xiaoyuy2906/mini-agent-nanobeam-cavity#readme",
+  "dependencies": {
+    "chalk": "^4.1.2",
+    "figlet": "^1.10.0"
+  }
+}
