@@ -71,14 +71,17 @@ Sweep ONE parameter at a time in this strict order. Lock the best value before m
 - Lock best value. Re-tune period if resonance drifted.
 
 **Step 2: `hole_rx_nm`** — sweep ±5nm steps from initial
-- Try +5nm first, keep going if Q/V improves, stop when it drops.
-- Then try -5nm direction. Stop when Q/V drops.
-- Lock best rx. Re-tune period if needed.
+- Try +5nm first. **MANDATORY: after EVERY rx change, ALWAYS re-tune period to bring resonance within ±5nm of target BEFORE evaluating Q/V. Never compare Q/V values at different resonance positions — the comparison is physically invalid.**
+- Only conclude rx is worse after re-tuning period. Do NOT abandon rx based on an untuned result.
+- Keep going if Q/V improves after re-tuning. Stop only when Q/V drops even after re-tuning.
+- Then try -5nm direction with same re-tune requirement.
+- Lock best rx.
 
 **Step 2b: Re-sweep `min_a_percent`** — optimal min_a depends on rx, so re-sweep it now.
 
 **Step 3: `hole_ry_nm`** — sweep ±5nm steps from initial (DO NOT SKIP)
-- Same procedure as rx. Lock best ry. Re-tune period if needed.
+- Same procedure as rx. **MANDATORY: re-tune period after every ry change before comparing Q/V.**
+- Lock best ry.
 
 **Step 3b: Re-sweep `min_a_percent`** — optimal min_a depends on ry, re-sweep again.
 
@@ -101,9 +104,10 @@ Once you have a high-Q design:
 ## Core Rules
 
 1. **Resonance first.** If |resonance - target| > 5nm, ONLY adjust period. Do not touch other parameters.
-2. **No duplicates.** Call `view_history` before EVERY `design_cavity`. Never re-run an exact parameter combination.
-3. **One change at a time.** Change only ONE sweep parameter per iteration. Period re-tuning after a parameter change counts as one logical step.
-4. **Never go backwards.** When you lock a best value, carry it forward. Do NOT reset a parameter when moving to the next sweep step.
+2. **Re-tune before comparing.** After changing rx, ry, min_a, or taper — ALWAYS re-tune period to within ±5nm of target before comparing Q/V. A Q/V result at the wrong resonance is meaningless and MUST NOT be used to judge a parameter.
+3. **No duplicates.** Call `view_history` before EVERY `design_cavity`. Never re-run an exact parameter combination.
+4. **One change at a time.** Change only ONE sweep parameter per iteration. Period re-tuning after a parameter change counts as one logical step.
+5. **Never go backwards.** When you lock a best value, carry it forward. Do NOT reset a parameter when moving to the next sweep step.
 5. **Provide a hypothesis.** Use the `hypothesis` field to explain your reasoning for each design.
 6. **Use `compare_designs`** when deciding between candidates — it shows side-by-side results.
 
