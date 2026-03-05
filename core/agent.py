@@ -4,18 +4,6 @@ from pathlib import Path
 from core.state import CavityDesignState
 from tools.toolset import Toolset
 
-SWEEP_ORDER = [
-    "sweep_min_a",
-    "sweep_rx",
-    "re_sweep_min_a_1",
-    "sweep_ry",
-    "re_sweep_min_a_2",
-    "sweep_taper",
-    "fine_period",
-    "complete",
-]
-
-
 class CavityAgent:
     """Orchestration layer: state + tools + workflow."""
 
@@ -63,7 +51,7 @@ class CavityAgent:
         return override_rule + base_prompt
 
     def _define_tools(self) -> list:
-        """Return the 5 tool schemas passed to every LLM call."""
+        """Return tool schemas passed to every LLM call."""
         return [
             {
                 "name": "set_unit_cell",
@@ -149,6 +137,24 @@ class CavityAgent:
             {
                 "name": "get_best_design",
                 "description": "Get the current best design with highest Q/V.",
+                "input_schema": {"type": "object", "properties": {}},
+            },
+            {
+                "name": "analyze_sensitivity",
+                "description": (
+                    "Analyze how sensitive Q, V, and Q/V are to each design parameter "
+                    "based on historical data. Returns sensitivities sorted by impact. "
+                    "Use this every 3-5 iterations to decide which parameter to sweep next."
+                ),
+                "input_schema": {"type": "object", "properties": {}},
+            },
+            {
+                "name": "suggest_next_experiment",
+                "description": (
+                    "Based on design history, suggest the most promising next experiment. "
+                    "Uses curve fitting to predict optimal parameter values and identifies "
+                    "unexplored regions. Returns a recommendation you may follow or override."
+                ),
                 "input_schema": {"type": "object", "properties": {}},
             },
         ]
@@ -313,6 +319,12 @@ class CavityAgent:
             else:
                 designs.append({"iteration": i, "error": "Not found"})
         return {"ok": True, "designs": designs}
+
+    def analyze_sensitivity(self) -> dict:
+        return self.state.analyze_sensitivity()
+
+    def suggest_next_experiment(self) -> dict:
+        return self.state.suggest_next_experiment()
 
     def get_summary(self) -> dict:
         return {"ok": True, "summary": self.state.get_summary()}

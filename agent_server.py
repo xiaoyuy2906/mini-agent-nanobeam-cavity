@@ -37,7 +37,25 @@ async def dispatch_tool(agent: CavityAgent, name: str, args: dict) -> dict:
         return agent.compare_designs(iterations=args.get("iterations", []))
     if name == "get_best_design":
         return agent.get_best_design()
+    if name == "analyze_sensitivity":
+        return agent.analyze_sensitivity()
+    if name == "suggest_next_experiment":
+        return agent.suggest_next_experiment()
     return {"ok": False, "error": f"Unknown tool: {name}"}
+
+
+REFLECTION_INTERVAL = 5  # Inject reflection prompt every N tool rounds
+
+REFLECTION_PROMPT = (
+    "[REFLECTION] You have completed {n} tool calls so far. "
+    "Pause and reflect:\n"
+    "1. Is Q/V converging or plateauing?\n"
+    "2. Which parameter had the most impact recently?\n"
+    "3. Should you change strategy (e.g., switch to a different parameter, "
+    "try a different taper_type, explore hole chirp)?\n"
+    "4. Consider calling analyze_sensitivity to reassess priorities.\n"
+    "State your updated strategy before continuing."
+)
 
 
 async def run_agent_loop(
@@ -48,6 +66,7 @@ async def run_agent_loop(
     conversation_history: list,
 ) -> None:
     conversation_history.append({"role": "user", "content": content})
+    tool_call_count = 0
 
     while True:
         response = await client.messages.create(
@@ -83,6 +102,16 @@ async def run_agent_loop(
             }
 
         tool_results = list(await asyncio.gather(*[_run_one(b) for b in tool_blocks]))
+        tool_call_count += len(tool_blocks)
+
+        # Inject reflection prompt periodically to encourage strategic thinking
+        if tool_call_count % REFLECTION_INTERVAL == 0 and tool_call_count > 0:
+            reflection = REFLECTION_PROMPT.format(n=tool_call_count)
+            tool_results.append({
+                "type": "text",
+                "text": reflection,
+            })
+
         conversation_history.append({"role": "user", "content": tool_results})
 
     emit({"type": "done"})
