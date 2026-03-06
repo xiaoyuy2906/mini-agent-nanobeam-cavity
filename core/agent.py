@@ -1,330 +1,302 @@
-import os
-from pathlib import Path
+"""CavityAgent — ReAct agent with SWE-agent-style history management.
 
+Architecture:
+- Tool registry: tools self-register via decorators (no if-else dispatch)
+- History: sliding window compression (old observations → one-line summaries)
+- Forced thought: hypothesis is required on design_cavity, plus reflection injection
+- Single process: no IPC, no JSON bridge, just async generator
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+from typing import AsyncGenerator
+
+from anthropic import AsyncAnthropic
+
+from core.history import compress_history, truncate_observation
 from core.state import CavityDesignState
-from tools.toolset import Toolset
+from core.tool_registry import dispatch, get_all_schemas
+
+# Import tools to trigger registration
+import core.tools  # noqa: F401
+
+_log = lambda *a, **kw: print(*a, file=sys.stderr, **kw)
+
+# --- Event types yielded to the UI layer ---
+
+class AgentEvent:
+    """Base event yielded by the agent loop."""
+    pass
+
+class ThoughtEvent(AgentEvent):
+    def __init__(self, text: str):
+        self.text = text
+
+class ToolStartEvent(AgentEvent):
+    def __init__(self, name: str, input: dict):
+        self.name = name
+        self.input = input
+
+class ToolEndEvent(AgentEvent):
+    def __init__(self, name: str, result: dict):
+        self.name = name
+        self.result = result
+
+class TextEvent(AgentEvent):
+    def __init__(self, text: str):
+        self.text = text
+
+class DoneEvent(AgentEvent):
+    pass
+
+class ErrorEvent(AgentEvent):
+    def __init__(self, message: str):
+        self.message = message
+
+
+# --- Reflection (injected periodically, like ReAct's forced reasoning) ---
+
+REFLECTION_INTERVAL = 5
+
+REFLECTION_PROMPT = (
+    "You have completed {n} tool calls. Before continuing, you MUST reflect:\n"
+    "1. Current best Q/V and how it's trending\n"
+    "2. Which parameter had the most impact\n"
+    "3. Whether to change strategy or continue current sweep\n"
+    "State your updated plan, then call your next tool."
+)
+
 
 class CavityAgent:
-    """Orchestration layer: state + tools + workflow."""
+    """ReAct agent for nanobeam cavity design."""
 
-    def __init__(self, toolset: Toolset, state: CavityDesignState | None = None):
-        self.toolset = toolset
-        self.state = state or CavityDesignState()
-        self.model_provider = os.getenv("MODEL_PROVIDER", "claude")
-        self.conversation_history = []
+    def __init__(self):
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise ValueError("ANTHROPIC_API_KEY not set in .env")
+
+        base_url = os.getenv("ANTHROPIC_BASE_URL")
+        self.client = (
+            AsyncAnthropic(api_key=api_key, base_url=base_url)
+            if base_url
+            else AsyncAnthropic(api_key=api_key)
+        )
+        self.model = os.getenv("MODEL_NAME", "claude-sonnet-4-6")
+        self.state = CavityDesignState()
+        self.messages: list[dict] = []
+        self.tool_call_count = 0
         self.system_prompt = self._build_system_prompt()
-        self.tools = self._define_tools()
+        self.tools = get_all_schemas()
 
     def _build_system_prompt(self) -> str:
-        """Load skills.md if available, fall back to base prompt."""
+        skills_path = Path(__file__).parent.parent / "skills.md"
         try:
-            skills_path = Path(__file__).parent.parent / "skills.md"
-            with open(skills_path, "r", encoding="utf-8") as f:
-                skills_text = f.read().strip()
+            skills_text = skills_path.read_text(encoding="utf-8").strip()
         except OSError:
             skills_text = ""
 
-        override_rule = (
+        # ReAct enforcement: explicit Thought-Action-Observation structure
+        react_preamble = (
+            "You are a ReAct agent for nanobeam photonic crystal cavity design.\n\n"
+            "## STRICT ReAct Protocol\n"
+            "Every turn you MUST follow this exact structure:\n\n"
+            "THOUGHT: [Analyze the current situation. What did you learn from the last "
+            "observation? What should you try next and why?]\n\n"
+            "Then call exactly ONE tool.\n\n"
+            "You will receive an OBSERVATION (tool result). Then repeat.\n\n"
+            "NEVER call a tool without first writing a THOUGHT section.\n"
+            "NEVER skip the THOUGHT — it is mandatory.\n\n"
             "## CRITICAL: USER INPUT OVERRIDES EVERYTHING\n"
-            "If the user gives explicit instructions, YOU MUST FOLLOW THEM EXACTLY.\n"
-            "NEVER invent missing unit-cell geometry. If a required value is missing, ask the user.\n"
+            "If the user gives explicit instructions, follow them exactly.\n"
+            "Never invent missing unit-cell geometry. If a required value is missing, ask.\n"
             "Before the FIRST FDTD run, show all unit-cell inputs and ask user confirmation.\n"
             "Only proceed after user says 'confirm fdtd'.\n\n"
         )
 
-        base_prompt = (
-            "You are an expert nanobeam photonic crystal cavity designer.\n\n"
-            "## Workflow\n"
-            "Each turn: THOUGHT → ACTION (one tool) → OBSERVATION\n\n"
+        if skills_text:
+            return react_preamble + skills_text
+        return react_preamble + self._fallback_prompt()
+
+    @staticmethod
+    def _fallback_prompt() -> str:
+        return (
             "## Goal\n"
-            "Maximize Q/V. Q > 1,000,000 and V < 0.5 (λ/n)³ is excellent.\n\n"
+            "Maximize Q/V. Q > 1,000,000 and V < 0.5 (lambda/n)^3 is excellent.\n\n"
             "## Tools\n"
             "- set_unit_cell: configure geometry (call first)\n"
             "- design_cavity: build GDS + run FDTD\n"
             "- view_history: inspect previous designs\n"
             "- compare_designs: compare specific iterations\n"
             "- get_best_design: retrieve current best\n"
+            "- analyze_sensitivity: compute parameter sensitivities\n"
+            "- suggest_next_experiment: data-driven next step recommendation\n"
         )
 
-        if skills_text:
-            return override_rule + skills_text
-        return override_rule + base_prompt
+    async def run(self, user_input: str) -> AsyncGenerator[AgentEvent, None]:
+        """Run one user turn through the ReAct loop. Yields events for the UI."""
+        self.messages.append({"role": "user", "content": user_input})
 
-    def _define_tools(self) -> list:
-        """Return tool schemas passed to every LLM call."""
-        return [
-            {
-                "name": "set_unit_cell",
-                "description": "Set the unit cell parameters. MUST be called first before designing.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "design_wavelength_nm": {"type": "number"},
-                        "wavelength_span_nm": {"type": "number"},
-                        "period_nm": {"type": "number"},
-                        "wg_width_nm": {"type": "number"},
-                        "wg_height_nm": {"type": "number"},
-                        "hole_rx_nm": {"type": "number"},
-                        "hole_ry_nm": {"type": "number"},
-                        "initial_min_a_percent": {"type": "number"},
-                        "wg_material": {"type": "string"},
-                        "wg_material_refractive_index": {"type": "number"},
-                        "freestanding": {"type": "boolean"},
-                        "substrate": {"type": "string"},
-                        "substrate_material_refractive_index": {"type": "number"},
-                    },
-                    "required": [
-                        "design_wavelength_nm",
-                        "period_nm",
-                        "wg_width_nm",
-                        "wg_height_nm",
-                        "hole_rx_nm",
-                        "hole_ry_nm",
-                        "wg_material",
-                        "wg_material_refractive_index",
-                        "freestanding",
-                    ],
-                },
-            },
-            {
-                "name": "design_cavity",
-                "description": "Design a cavity and run Lumerical FDTD for Q/V performance.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "period_nm": {"type": "number"},
-                        "wg_width_nm": {"type": "number"},
-                        "hole_rx_nm": {"type": "number"},
-                        "hole_ry_nm": {"type": "number"},
-                        "num_taper_holes": {"type": "integer"},
-                        "num_mirror_holes": {"type": "integer"},
-                        "min_a_percent": {"type": "number"},
-                        "min_rx_percent": {"type": "number"},
-                        "min_ry_percent": {"type": "number"},
-                        "hypothesis": {"type": "string"},
-                    },
-                    "required": [
-                        "num_taper_holes",
-                        "num_mirror_holes",
-                        "min_a_percent",
-                    ],
-                },
-            },
-            {
-                "name": "view_history",
-                "description": "View the history of all designs tried so far.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "last_n": {"type": "integer"},
-                    },
-                },
-            },
-            {
-                "name": "compare_designs",
-                "description": "Compare two or more designs side by side.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "iterations": {
-                            "type": "array",
-                            "items": {"type": "integer"},
-                        }
-                    },
-                    "required": ["iterations"],
-                },
-            },
-            {
-                "name": "get_best_design",
-                "description": "Get the current best design with highest Q/V.",
-                "input_schema": {"type": "object", "properties": {}},
-            },
-            {
-                "name": "analyze_sensitivity",
-                "description": (
-                    "Analyze how sensitive Q, V, and Q/V are to each design parameter "
-                    "based on historical data. Returns sensitivities sorted by impact. "
-                    "Use this every 3-5 iterations to decide which parameter to sweep next."
-                ),
-                "input_schema": {"type": "object", "properties": {}},
-            },
-            {
-                "name": "suggest_next_experiment",
-                "description": (
-                    "Based on design history, suggest the most promising next experiment. "
-                    "Uses curve fitting to predict optimal parameter values and identifies "
-                    "unexplored regions. Returns a recommendation you may follow or override."
-                ),
-                "input_schema": {"type": "object", "properties": {}},
-            },
-        ]
+        while True:
+            # SWE-agent pattern: compress history before each LLM call
+            compressed = compress_history(self.messages)
 
-    SUBSTRATE_LUMERICAL = {
-        "SiO2": "SiO2 (Glass) - Palik",
-        "Si": "Si (Silicon) - Palik",
-        "Diamond": "Diamond - Palik",
-        "none": None,
-    }
+            try:
+                response = await self.client.messages.create(
+                    model=self.model,
+                    max_tokens=4096,
+                    system=self.system_prompt,
+                    tools=self.tools,
+                    messages=compressed,
+                )
+            except Exception as e:
+                yield ErrorEvent(str(e))
+                return
 
-    def set_unit_cell(self, unit_cell: dict) -> dict:
-        if not isinstance(unit_cell, dict) or not unit_cell:
-            return {"ok": False, "error": "unit_cell must be a non-empty dict"}
+            # Store the full (uncompressed) assistant response
+            self.messages.append({"role": "assistant", "content": response.content})
 
-        self.state.unit_cell = unit_cell
-        return {"ok": True, "message": "Unit cell configured"}
+            # Yield text blocks (the THOUGHT part of ReAct)
+            for block in response.content:
+                if block.type == "text" and block.text:
+                    yield ThoughtEvent(block.text)
 
-    def set_unit_cell_from_tool_params(self, params: dict) -> dict:
-        """Convert flat tool params to unit_cell and call set_unit_cell."""
-        required = [
-            "design_wavelength_nm", "period_nm", "wg_width_nm", "wg_height_nm",
-            "hole_rx_nm", "hole_ry_nm", "wg_material", "wg_material_refractive_index",
-        ]
-        missing = [f for f in required if f not in params or params[f] is None]
-        if missing:
-            return {"ok": False, "error": f"Missing required: {', '.join(missing)}"}
+            # If no tool use, the agent is done for this turn
+            if response.stop_reason != "tool_use":
+                # Yield any final text as a response
+                for block in response.content:
+                    if block.type == "text" and block.text:
+                        yield TextEvent(block.text)
+                break
 
-        freestanding = params.get("freestanding", True)
-        substrate = params.get("substrate", "none")
-        if freestanding:
-            substrate = "none"
+            # Execute tools
+            tool_blocks = [b for b in response.content if b.type == "tool_use"]
+            tool_results = []
 
-        nm_to_um = 1e-3  # 200 nm = 0.2 um
-        unit_cell = {
-            "design_wavelength": float(params["design_wavelength_nm"]) * 1e-9,  # nm -> m
-            "wavelength_span": float(params.get("wavelength_span_nm", 100)) * 1e-9,
-            "period": float(params["period_nm"]) * nm_to_um,
-            "wg_width": float(params["wg_width_nm"]) * nm_to_um,
-            "wg_height": float(params["wg_height_nm"]) * nm_to_um,
-            "hole_rx": float(params["hole_rx_nm"]) * nm_to_um,
-            "hole_ry": float(params["hole_ry_nm"]) * nm_to_um,
-            "material": str(params["wg_material"]),
-            "material_refractive_index": float(params["wg_material_refractive_index"]),
-            "freestanding": freestanding,
-            "substrate": substrate,
-            "substrate_lumerical": self.SUBSTRATE_LUMERICAL.get(substrate),
-            "substrate_refractive_index": params.get("substrate_material_refractive_index"),
-        }
-        return self.set_unit_cell(unit_cell)
+            for block in tool_blocks:
+                yield ToolStartEvent(block.name, block.input)
 
-    def _design_params_to_build_gds_kwargs(self, params: dict) -> dict:
-        """Merge unit_cell with design params and convert to build_gds kwargs (microns)."""
-        uc = self.state.unit_cell or {}
-        nm_to_um = 1e-3
+                result = await dispatch(block.name, block.input, self)
+                self.tool_call_count += 1
 
-        def _get(key_nm: str, uc_key: str, default_um: float) -> float:
-            v = params.get(key_nm)
+                yield ToolEndEvent(block.name, result)
+
+                # SWE-agent pattern: format observation for LLM readability
+                formatted = self._format_tool_result(block.name, result)
+                formatted = truncate_observation(formatted)
+
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": formatted,
+                })
+
+            # Inject reflection prompt periodically (ReAct forced reasoning)
+            if (
+                self.tool_call_count > 0
+                and self.tool_call_count % REFLECTION_INTERVAL == 0
+            ):
+                tool_results.append({
+                    "type": "text",
+                    "text": REFLECTION_PROMPT.format(n=self.tool_call_count),
+                })
+
+            self.messages.append({"role": "user", "content": tool_results})
+
+        yield DoneEvent()
+
+    @staticmethod
+    def _format_tool_result(tool_name: str, result: dict) -> str:
+        """Format tool result as human-readable text, not raw JSON.
+
+        This is the SWE-agent ACI principle: tool outputs should be
+        formatted for LLM comprehension, not dumped as JSON.
+        """
+        if not result.get("ok", True):
+            error = result.get("error", "Unknown error")
+            return f"ERROR: {error}"
+
+        if tool_name == "design_cavity":
+            r = result.get("result", {})
+            iteration = result.get("iteration", "?")
+            q = r.get("Q")
+            v = r.get("V")
+            qv = r.get("qv_ratio")
+            res_nm = r.get("resonance_nm")
+            best = result.get("best_qv_ratio", 0)
+
+            lines = [f"=== Iteration #{iteration} Result ==="]
+            if q is not None:
+                lines.append(f"  Q factor:    {q:,.0f}")
             if v is not None:
-                return float(v) * nm_to_um
-            u = uc.get(uc_key)
-            if isinstance(u, (int, float)):
-                return float(u)
-            return default_um
+                lines.append(f"  Mode volume: {v:.4f} (lambda/n)^3")
+            if qv is not None:
+                lines.append(f"  Q/V ratio:   {qv:,.0f}")
+            if res_nm is not None:
+                lines.append(f"  Resonance:   {res_nm:.2f} nm")
+            lines.append(f"  Best Q/V so far: {best:,.0f}")
+            return "\n".join(lines)
 
-        period = _get("period_nm", "period", 0.2)
-        wg_width = _get("wg_width_nm", "wg_width", 0.45)
-        hole_rx = _get("hole_rx_nm", "hole_rx", 0.05)
-        hole_ry = _get("hole_ry_nm", "hole_ry", 0.1)
+        if tool_name == "set_unit_cell":
+            msg = result.get("message", "Unit cell configured")
+            return f"OK: {msg}"
 
-        return {
-            "period": period,
-            "hole_rx": hole_rx,
-            "hole_ry": hole_ry,
-            "wg_width": wg_width,
-            "num_taper_holes": int(params.get("num_taper_holes", 8)),
-            "num_mirror_holes": int(params.get("num_mirror_holes", 10)),
-            "min_a_percent": float(params.get("min_a_percent", 90)),
-            "min_rx_percent": float(params.get("min_rx_percent", 100)),
-            "min_ry_percent": float(params.get("min_ry_percent", 100)),
-            "taper_type": str(params.get("taper_type", "quadratic")),
-        }
+        if tool_name == "view_history":
+            history = result.get("history", [])
+            total = result.get("total", 0)
+            if not history:
+                return "No designs yet."
+            lines = [f"Design history ({total} total):"]
+            for entry in history:
+                i = entry.get("iteration", "?")
+                r = entry.get("result", {})
+                q = r.get("Q", "N/A")
+                v = r.get("V", "N/A")
+                qv = r.get("qv_ratio", "N/A")
+                res = r.get("resonance_nm", "N/A")
+                q_str = f"{q:,.0f}" if isinstance(q, (int, float)) else str(q)
+                v_str = f"{v:.3f}" if isinstance(v, (int, float)) else str(v)
+                qv_str = f"{qv:,.0f}" if isinstance(qv, (int, float)) else str(qv)
+                res_str = f"{res:.1f}nm" if isinstance(res, (int, float)) else str(res)
+                lines.append(f"  #{i}: Q={q_str}  V={v_str}  Q/V={qv_str}  res={res_str}")
+            return "\n".join(lines)
 
-    async def design_cavity(self, design_params: dict, run: bool = True) -> dict:
-        if self.state.unit_cell is None:
-            return {"ok": False, "error": "Call set_unit_cell first"}
+        if tool_name == "compare_designs":
+            designs = result.get("designs", [])
+            if not designs:
+                return "No designs to compare."
+            lines = ["Design comparison:"]
+            for d in designs:
+                if "error" in d:
+                    lines.append(f"  #{d.get('iteration','?')}: {d['error']}")
+                    continue
+                i = d.get("iteration", "?")
+                r = d.get("result", {})
+                p = d.get("params", {})
+                lines.append(f"  #{i}: Q={r.get('Q', 'N/A'):,.0f}  V={r.get('V', 'N/A'):.3f}  Q/V={r.get('qv_ratio', 'N/A'):,.0f}")
+                lines.append(f"      params: min_a={p.get('min_a_percent','?')}%  taper={p.get('num_taper_holes','?')}  mirror={p.get('num_mirror_holes','?')}")
+            return "\n".join(lines)
 
-        kwargs = self._design_params_to_build_gds_kwargs(design_params)
-
-        # 1) Build GDS
-        gds_ret = self.toolset.build_gds(**kwargs)
-        if not gds_ret["ok"]:
-            return gds_ret
-
-        cavity = gds_ret["data"]
-        config = cavity.get_config()
-
-        # 2) Fill required config fields from state
-        uc = self.state.unit_cell
-        config.setdefault("unit_cell", {})
-        config["unit_cell"]["wg_height"] = uc.get("wg_height", 0.22)
-
-        config["wavelength"] = {
-            "design_wavelength": uc.get("design_wavelength", 737e-9),
-            "wavelength_span": uc.get("wavelength_span", 100e-9),
-        }
-
-        config["substrate"] = {
-            "freestanding": uc.get("freestanding", True),
-            "material": uc.get("substrate", "none"),
-            "material_lumerical": uc.get("substrate_lumerical"),
-            "refractive_index": uc.get("substrate_refractive_index"),
-        }
-
-        config.setdefault("lumerical", {})
-        config["lumerical"]["refractive_index"] = uc.get(
-            "material_refractive_index", 2.4
-        )
-
-        # 3) Run simulation (async)
-        sim_ret = await self.toolset.run_simulation(
-            config=config, mesh_accuracy=8, run=run
-        )
-        if not sim_ret["ok"]:
-            return sim_ret
-
-        sim_result = sim_ret["data"]
-
-        # 4) Update state (store params for display)
-        log_params = {**design_params, "period": kwargs.get("period"), "wg_width": kwargs.get("wg_width")}
-        self.state.add_design(log_params, sim_result)
-        self.state.save_log()
-
-        return {
-            "ok": True,
-            "iteration": self.state.iteration,
-            "result": sim_result,
-            "best_qv_ratio": self.state.best_qv_ratio,
-        }
-
-    def get_best_design(self) -> dict:
-        if self.state.best_design is None:
-            return {"ok": False, "message": "No design yet"}
-        return {"ok": True, "best_design": self.state.best_design}
-
-    def view_history(self, last_n: int | None = None) -> dict:
-        history = self.state.design_history
-        if not history:
-            return {"ok": True, "message": "No designs yet", "history": []}
-        if last_n:
-            history = history[-last_n:]
-        return {"ok": True, "history": history, "total": len(self.state.design_history)}
-
-    def compare_designs(self, iterations: list[int]) -> dict:
-        designs = []
-        for i in iterations:
-            entry = next(
-                (d for d in self.state.design_history if d["iteration"] == i), None
+        if tool_name == "get_best_design":
+            best = result.get("best_design", {})
+            if not best:
+                return result.get("message", "No design yet.")
+            r = best.get("result", {})
+            p = best.get("params", {})
+            return (
+                f"Best design (iteration #{best.get('iteration','?')}):\n"
+                f"  Q={r.get('Q', 'N/A'):,.0f}  V={r.get('V', 'N/A'):.3f}  "
+                f"Q/V={r.get('qv_ratio', 'N/A'):,.0f}  res={r.get('resonance_nm', 'N/A'):.1f}nm\n"
+                f"  min_a={p.get('min_a_percent','?')}%  taper_holes={p.get('num_taper_holes','?')}  "
+                f"mirror_holes={p.get('num_mirror_holes','?')}"
             )
-            if entry:
-                designs.append(entry)
-            else:
-                designs.append({"iteration": i, "error": "Not found"})
-        return {"ok": True, "designs": designs}
 
-    def analyze_sensitivity(self) -> dict:
-        return self.state.analyze_sensitivity()
+        if tool_name in ("analyze_sensitivity", "suggest_next_experiment"):
+            # These are already structured — format nicely
+            return json.dumps(result, indent=2, default=str)
 
-    def suggest_next_experiment(self) -> dict:
-        return self.state.suggest_next_experiment()
-
-    def get_summary(self) -> dict:
-        return {"ok": True, "summary": self.state.get_summary()}
+        # Fallback: compact JSON
+        return json.dumps(result, default=str)
